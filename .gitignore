@@ -1,0 +1,13 @@
+# 游戏本体自己有仓库（1.7G，独立管理）
+workplace_town/
+
+# 渲染与导出中间产物
+_render_ap_report/
+_render_mechanics/
+_render_review/
+story_review_render/
+
+# 系统杂项
+Thumbs.db
+desktop.ini
+.DS_Store
