@@ -1,0 +1,11 @@
+file=E:\03_Projects\bear\剧情册\剧情册.docx
+bytes=124563
+paragraphs=952 tables=63
+M02_LIBRARY: 6
+E10b: 6
+延期复核: 4
+未转正: 11
+第七月补充复核: 1
+第八月不重复开放转正复核: 1
+probation_status=not_confirmed: 1
+stale_m8_review=False
