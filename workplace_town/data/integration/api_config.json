@@ -1,0 +1,6 @@
+{
+  "mode": "live",
+  "baseUrl": "http://127.0.0.1:8077",
+	"contentVersion": "v1.2",
+	"note": "本机 V1.2 后端模式。需先启动 backend/api/server.py；前端不计算分数。"
+}

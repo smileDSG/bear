@@ -1,5 +1,11 @@
-# 游戏本体自己有仓库（1.7G，独立管理）
-workplace_town/
+# 游戏本体里未纳入备份的本地临时文件
+workplace_town/_26.txt
+workplace_town/_tmp_art_audit.py
+workplace_town/storybook_backup_*.docx
+workplace_town/tools/phone_unlock_mockup.html
+workplace_town/tools/phone_unlock_mockup_preview.html
+workplace_town/tools/phone_unlock_phone*
+workplace_town/tools/phone_unlock_preview*
 
 # 渲染与导出中间产物
 _render_ap_report/

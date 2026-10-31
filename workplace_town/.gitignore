@@ -1,0 +1,47 @@
+/node_modules
+**/node_modules
+/oh_modules
+/local.properties
+/.idea
+.codegenie/
+**/build
+**/.preview
+/.hvigor
+.godot/
+output/
+tmp-godot-templates/
+test_artifacts/
+/artifacts/
+tools/startup_home_preview.png*
+tools/startup_home_hover_preview.png*
+*.hap
+.env
+.env.*
+!.env.example
+/backend/local_llm_config.json
+.cxx
+/.clangd
+/.clang-format
+/.clang-tidy
+**/.test
+/.appanalyzer
+
+# Python（backend/engine_core）
+__pycache__/
+*.pyc
+
+# 后端运行时数据库（server.py 的 WORKPLACE_TOWN_DB_PATH，默认落 backend/api/）
+# 是跑出来的产物不是源码；库名每次换新的本来是绕文件锁的手段，更不该进库。
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地隔离区（AI 会话产生的旧文件；** 前缀让它覆盖所有子目录，如 scripts/.trash/）
+.trash/
+**/.trash/
+
+# 纸娃娃合成过程残留（并行会话生成）
+*.tmp
+
+# Word 临时锁文件
+~$*

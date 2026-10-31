@@ -1,0 +1,1311 @@
+# -*- coding: utf-8 -*-
+"""M4 最小服务层：把 contracts/openapi.yaml 的核心端点变成可执行体。
+
+范围（其余端点后续补）：
+  GET  /api/v1/health                                    存活检查
+  POST /api/v1/sessions                                  建会话（支持 resumeSessionId 续接）
+  GET  /api/v1/sessions/{sid}                            读权威会话状态
+  GET  /api/v1/sessions/{sid}/next                       下一个可玩节点
+  POST /api/v1/sessions/{sid}/events                     幂等上报（主线选择真正进引擎结算）
+  GET  /api/v1/sessions/{sid}/npcs/{npcId}/memories      NPC 记忆（事件流推导，只读）
+  POST /api/v1/sessions/{sid}/report                     生成终局报告（202 + 状态）
+  GET  /api/v1/sessions/{sid}/report                     读已成片的报告（未成片 404）
+  GET  /api/v1/sessions/{sid}/report/status              轮询生成状态
+
+设计要点：
+  - 只用标准库（http.server + sqlite3），与 engine_core 的零依赖口径一致；FastAPI 是后续升级项。
+  - 引擎状态以 JSON 快照存在 sessions.state_json，每结算一条主线事件推进一次；
+    重启不丢，且与「跑批可复算」精神一致（事件流重放可还原同一状态）。
+  - **叙事编号 ↔ 引擎键走 data/story/story_key_map.json**（2026-09-16 起）。
+    旧做法「storyId 去掉 M 前缀」只对第 1 件成立：Godot 的 M1-E02 是「技术选型」，
+    而打分卡 E02 是「第一次被轻视」。靠前缀裁剪的后果是前 8 件静默记错账、第 9 件起 409。
+    映射表里不含任何打分载荷，所以不违反「scoring_cards 不下发前端」的红线。
+  - **会话推进用映射表的 playableOrder，不是引擎的全量 44 节点 schedule**：
+    Godot 目前只提供 19 个测评节点，按全量 schedule 校验会卡在缺失节点上（实测第 9 件
+    就撞上成就节点 C1）。缺失节点在报告层表现为「证据不足」，算法册 §6 本来就允许。
+    playableOrder 随剧情补齐逐件变长，全部补齐即等价于全量 schedule。
+  - 跳事件仍回 409（契约：conflicts with current story state）—— 这条守住，
+    它是唯二能发现编号错位的机制（另一个是 completedStoryIds 对账）。
+  - **纯叙事成就节点 C1/C2/C3 靠 achievement_view 推进**：它们 no_decision、无选项，
+    走不进选择通道；没有这条分支，会话会永远停在这三件上。
+  - 测评埋点与叙事埋点全部落 events 表；只有带 storyId+choiceId 的选择事件触发引擎结算。
+  - 选项没对齐的事件（align=pending_rewrite）一律 409 并说明原因，
+    **绝不退回正则按同名选项记分** —— 那正是「善意选项被记成越界选项」的来源。
+  - NPC 记忆四层（fact/relation/state/social）从决策流推导，绝不单独存储（契约红线）。
+  - **报告走 app.report.build()，服务层只喂料不重算**（2026-09-16 起）：
+    报告算法本身完整且是纯函数，服务层零算法；阈值与打分卡永不下发（契约 anti-leak 红线）。
+    契约把生成写成异步（202 → 轮询），但生成是纯模板毫秒级、无大模型 → **同步生成后如实回 ready**，
+    不伪造 pending/generating 中间态。POST 幂等：已成片则不重算（契约「请求两次返回同一个 handle」）。
+    转成异步只需把 generate_report 换成丢线程池 + 状态位，接口形状不用动。
+  - 报告缺料的地方**留空不估算**：服务层没有跑批的逐月日志 → situationTrack.states 为空；
+    档案自评（profile_answer 埋点）尚未采集 → 无后验与矛盾度。报告层自己按「证据不足」处理，
+    这是算法册 §6 允许的表现，不用假数据顶替。
+
+本机注意：这台机器新文件约 5 分钟后被锁、新进程无法写打开 —— SQLite 库文件重启会变只读。
+      用环境变量 WORKPLACE_TOWN_DB_PATH 每次启动指一个新文件即可（同 ARISAI 的 ARISAI_DB_PATH 做法）。
+
+环境变量：
+  WORKPLACE_TOWN_DB_PATH   SQLite 路径（默认 backend/api/workplace_town.db）
+  WORKPLACE_TOWN_PORT      监听端口（默认 8077）
+"""
+
+from __future__ import annotations
+
+import json
+import hashlib
+import hmac
+import os
+import re
+import secrets
+import sqlite3
+import sys
+import threading
+import uuid
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+_ENGINE_ROOT = Path(__file__).resolve().parents[1] / "engine_core"
+sys.path.insert(0, str(_ENGINE_ROOT))
+
+from app.core.loader import EventDef, load  # noqa: E402
+from app.core import constants as C  # noqa: E402
+from app.engine import promotion as pr  # noqa: E402
+from app.engine import survival as sv  # noqa: E402
+from app.engine import timeline as tl  # noqa: E402
+from app.engine.settlement import normalize_mainline, settle  # noqa: E402
+from app.engine.state import DecisionRecord, GameState  # noqa: E402
+from app.report import build as build_report  # noqa: E402
+
+import id_map  # noqa: E402
+import npc_chat  # noqa: E402
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+DB_PATH = Path(sys.argv[sys.argv.index("--db") + 1]) if "--db" in sys.argv \
+    else Path(__import__("os").environ.get("WORKPLACE_TOWN_DB_PATH",
+                                           Path(__file__).resolve().parent / "workplace_town.db"))
+PORT = int(sys.argv[sys.argv.index("--port") + 1]) if "--port" in sys.argv \
+    else int(__import__("os").environ.get("WORKPLACE_TOWN_PORT", "8077"))
+
+# 叙事编号 ↔ 引擎测评节点键的唯一映射（人工逐条确认，data/story 下）。
+STORY_KEY_MAP_PATH = REPO_ROOT / "data" / "story" / "story_key_map.json"
+STORY_KEY_MAP_V12_PATH = REPO_ROOT / "data" / "story" / "story_key_map_v12.json"
+STORY_V12_PATH = REPO_ROOT / "data" / "story" / "main_story_v12.json"
+
+NPC_IDS = {"wang_ge", "chen_gong", "xiao_lin", "lao_zhou", "xiao_zhao"}
+# 契约 eventType 枚举里没有 "main_choice"（fixture 在用），两条口径都收。
+CHOICE_TAPS = {"main_choice", "option_click"}
+REGION_RE = re.compile(r"^[A-H]$")
+
+_lock = threading.RLock()
+
+
+def load_story_json(path: Path) -> dict:
+    """读取 Godot JSON 资源，兼容资源文件允许的尾逗号。"""
+    raw = path.read_text(encoding="utf-8")
+    cleaned: list[str] = []
+    in_string = False
+    escaped = False
+    index = 0
+    while index < len(raw):
+        char = raw[index]
+        if in_string:
+            cleaned.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            cleaned.append(char)
+            index += 1
+            continue
+        if char == ",":
+            lookahead = index + 1
+            while lookahead < len(raw) and raw[lookahead].isspace():
+                lookahead += 1
+            if lookahead < len(raw) and raw[lookahead] in "]}":
+                index += 1
+                continue
+        cleaned.append(char)
+        index += 1
+    return json.loads("".join(cleaned))
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+class Store:
+    """SQLite 存取。所有写操作持锁，ThreadingHTTPServer 下安全。"""
+
+    def __init__(self, db_path: Path):
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.conn.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions(
+            session_id      TEXT PRIMARY KEY,
+            created_at      TEXT NOT NULL,
+            content_version TEXT NOT NULL,
+            state_json      TEXT NOT NULL,
+            access_token_hash TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS events(
+            session_id    TEXT NOT NULL,
+            event_id      TEXT NOT NULL,
+            seq           INTEGER,
+            event_type    TEXT NOT NULL,
+            client_time   TEXT NOT NULL,
+            payload_json  TEXT NOT NULL,
+            response_json TEXT NOT NULL,
+            created_at    TEXT NOT NULL,
+            PRIMARY KEY(session_id, event_id)
+        );
+        CREATE TABLE IF NOT EXISTS reports(
+            session_id   TEXT PRIMARY KEY,
+            status       TEXT NOT NULL,
+            reason       TEXT NOT NULL DEFAULT '',
+            payload_json TEXT NOT NULL DEFAULT '',
+            requested_at TEXT NOT NULL,
+            generated_at TEXT
+        );
+        """)
+        columns = {row[1] for row in self.conn.execute("PRAGMA table_info(sessions)")}
+        if "access_token_hash" not in columns:
+            self.conn.execute(
+                "ALTER TABLE sessions ADD COLUMN access_token_hash TEXT NOT NULL DEFAULT ''")
+            self.conn.commit()
+
+    # ---- sessions
+    def create_session(self, content_version: str, state_json: str) -> str:
+        sid = str(uuid.uuid4())
+        with _lock:
+            self.conn.execute(
+                "INSERT INTO sessions(session_id, created_at, content_version, state_json)"
+                " VALUES(?,?,?,?)",
+                (sid, now_iso(), content_version, state_json))
+            self.conn.commit()
+        return sid
+
+    def get_session(self, sid: str):
+        with _lock:
+            row = self.conn.execute(
+                "SELECT * FROM sessions WHERE session_id=?", (sid,)).fetchone()
+        return row
+
+    def set_access_token(self, sid: str, token: str) -> None:
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with _lock:
+            self.conn.execute("UPDATE sessions SET access_token_hash=? WHERE session_id=?",
+                              (digest, sid))
+            self.conn.commit()
+
+    def verify_access_token(self, sid: str, token: str) -> bool:
+        if not token:
+            return False
+        row = self.get_session(sid)
+        return bool(row and row["access_token_hash"] and hmac.compare_digest(
+            row["access_token_hash"], hashlib.sha256(token.encode("utf-8")).hexdigest()))
+
+    def claim_legacy_session(self, sid: str) -> str | None:
+        token = secrets.token_urlsafe(32)
+        digest = hashlib.sha256(token.encode("utf-8")).hexdigest()
+        with _lock:
+            updated = self.conn.execute(
+                "UPDATE sessions SET access_token_hash=?"
+                " WHERE session_id=? AND access_token_hash=''", (digest, sid))
+            self.conn.commit()
+        return token if updated.rowcount == 1 else None
+
+    def save_state(self, sid: str, state_json: str) -> None:
+        with _lock:
+            self.conn.execute(
+                "UPDATE sessions SET state_json=? WHERE session_id=?", (state_json, sid))
+            self.conn.commit()
+
+    # ---- events
+    def get_event(self, sid: str, event_id: str):
+        with _lock:
+            row = self.conn.execute(
+                "SELECT * FROM events WHERE session_id=? AND event_id=?",
+                (sid, event_id)).fetchone()
+        return row
+
+    def insert_event(self, sid: str, event_id: str, seq, event_type: str,
+                     client_time: str, payload_json: str, response_json: str) -> None:
+        with _lock:
+            self.conn.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
+                (sid, event_id, seq, event_type, client_time, payload_json,
+                 response_json, now_iso()))
+            self.conn.commit()
+
+    def update_event_response(self, sid: str, event_id: str, response_json: str) -> None:
+        with _lock:
+            self.conn.execute(
+                "UPDATE events SET response_json=? WHERE session_id=? AND event_id=?",
+                (response_json, sid, event_id))
+            self.conn.commit()
+
+    def update_event_payload(self, sid: str, event_id: str, payload: dict) -> None:
+        with _lock:
+            self.conn.execute(
+                "UPDATE events SET payload_json=? WHERE session_id=? AND event_id=?",
+                (json.dumps(payload, ensure_ascii=False), sid, event_id))
+            self.conn.commit()
+
+    def story_ids(self, sid: str) -> list[str]:
+        with _lock:
+            rows = self.conn.execute(
+                "SELECT payload_json FROM events WHERE session_id=? ORDER BY created_at",
+                (sid,)).fetchall()
+        out = []
+        for r in rows:
+            p = json.loads(r["payload_json"])
+            if p.get("storyId") and p.get("choiceId"):
+                out.append(p["storyId"])
+        return out
+
+    def region_ids(self, sid: str) -> list[str]:
+        with _lock:
+            rows = self.conn.execute(
+                "SELECT payload_json FROM events WHERE session_id=?", (sid,)).fetchall()
+        out = []
+        for r in rows:
+            p = json.loads(r["payload_json"])
+            rid = p.get("regionId")
+            if rid and REGION_RE.match(str(rid)) and rid not in out:
+                out.append(rid)
+        return out
+
+    def event_stream(self, sid: str) -> list:
+        """本会话的原始事件流（按落库顺序）。报告层要用它还原埋点轨迹。"""
+        with _lock:
+            return self.conn.execute(
+                "SELECT event_id, event_type, payload_json FROM events WHERE session_id=?"
+                " ORDER BY created_at", (sid,)).fetchall()
+
+    # ---- reports（一个会话一份；契约要求幂等，所以按 session_id 主键 upsert）
+    def get_report(self, sid: str):
+        with _lock:
+            return self.conn.execute(
+                "SELECT * FROM reports WHERE session_id=?", (sid,)).fetchone()
+
+    def save_report(self, sid: str, status: str, reason: str,
+                    payload_json: str, generated_at: str | None) -> None:
+        with _lock:
+            self.conn.execute(
+                "INSERT INTO reports(session_id, status, reason, payload_json,"
+                " requested_at, generated_at) VALUES(?,?,?,?,?,?)"
+                " ON CONFLICT(session_id) DO UPDATE SET"
+                " status=excluded.status, reason=excluded.reason,"
+                " payload_json=excluded.payload_json, generated_at=excluded.generated_at",
+                (sid, status, reason, payload_json, now_iso(), generated_at))
+            self.conn.commit()
+
+
+class Engine:
+    """engine_core 的进程内单例：配置装一次，schedule 算一次。"""
+
+    def __init__(self, story_version: str = "legacy"):
+        # 引擎的 FILES 直接拼 scoring_cards.json，配置在 data/story/ 下
+        self.reg = load(REPO_ROOT / "data" / "story")
+        if story_version == "v1.2":
+            story = load_story_json(STORY_V12_PATH)["events"]
+            for index, event in enumerate(story):
+                key = event["scoringKey"]
+                if key not in self.reg.events:
+                    self.reg.events[key] = EventDef(key, self.reg.cards[key], index)
+            self.sched_month = {e["scoringKey"]: int(e["month"]) for e in story}
+            self.sched_order = [e["scoringKey"] for e in story]
+        else:
+            schedule = tl.build_schedule(self.reg)
+            self.sched_month = {eid: m for m, eid in schedule}
+            self.sched_order = [eid for _, eid in schedule]
+
+    def new_state(self) -> GameState:
+        return GameState(seed=0)
+
+    # ---- 序列化
+    @staticmethod
+    def state_to_json(st: GameState) -> str:
+        return json.dumps(st.to_dict(), ensure_ascii=False)
+
+    @staticmethod
+    def state_from_json(raw: str) -> GameState:
+        d = json.loads(raw)
+        decisions = [DecisionRecord(**r) for r in d.pop("decisions", [])]
+        st = GameState(**d)
+        st.decisions = decisions
+        return st
+
+    def act_number(self, engine_key: str) -> int:
+        act = str(self.reg.events[engine_key].act)
+        m = re.search(r"\d+", act)
+        return int(m.group()) if m else 1
+
+    # ---- 主线结算
+    def settle_mainline(self, st: GameState, engine_key: str, option: str,
+                        hesitation_ms, switch_count, month: int | None = None) -> dict:
+        month = month if month is not None else self.sched_month[engine_key]
+        st.month = max(st.month, month)
+        choice = normalize_mainline(self.reg, engine_key, option)
+        result = settle(st, choice, self.reg, month=month,
+                        hesitation_ms=hesitation_ms, switch_count=switch_count)
+        # 月末尾巴（补齐跨过的月份：考核窗 + 生存轨）。
+        # 返回值里只留 promotionWindows —— 生存轨的迁移结果归 _session_state
+        # 下发（那里才是「你的处境」页读的地方），事件回包不必再多一份。
+        tails = self.settle_months_tail(st)
+        result["promotionWindows"] = [t["promotion"] for t in tails if "promotion" in t]
+        return result
+
+    def settle_months_tail(self, st: GameState) -> list[dict]:
+        """补齐「已跨过但还没做月末尾巴」的月份（含考核窗 + 生存轨）。
+
+        跑批路径（simulation.run）是**逐月**循环，月末的东西每月自然命中一次；
+        服务层是**逐事件跳跃**推进 —— 月份取自事件排期 sched_month，
+        相邻两件事之间可能跨过 1-3 个月，中间的月份会被整个跳过去。
+        这里在每次结算后，按月份升序把跨过的月份补齐。
+
+        月末尾巴的顺序照跑批 simulation.run 的月末段（第 212-236 行）：
+            ① 考核窗：survival.raise_flags → promotion.settle_window
+            ② 生存轨：survival.monthly_tick
+        两者不可换序：raise_flags 读的是 window_flags，而 settle_window 会把它清零。
+
+        为什么补是对的：
+          - settle_window 结算后会重置 window_cumulative / window_flags，
+            所以补一个窗拿到的恰好是「自上个窗以来」的累积，与跑批语义一致；
+          - monthly_tick 每月只让 months_since_mistake +1，逐月补与连续推进等价，
+            「连续 6 个月无失误自动回升一级」的自我修复也因此不会在跳月时被吃掉。
+
+        幂等锚是 st.settled_months（**落库**，不是内存）→ 重放 / 重复上报
+        不会把同一个月跑两遍，这也是它与 promotion.promotion_windows 的区别。
+
+        ⚠ 2026-09-18 前这里只补考核窗，生存轨整条没接 —— 结果是「只记失误、不修复」，
+        strikes 单向累积恶化。现在补齐整条月末尾巴。
+        """
+        done = set(st.settled_months)
+        out: list[dict] = []
+        for m in range(1, st.month + 1):
+            if m in done:
+                continue
+            done.add(m)
+            st.settled_months.append(m)
+            rec: dict = {"month": m}
+            if m in C.PROMOTION_MONTHS:
+                # ① 窗结算前先看本窗有没有新增隐瞒（生存轨的「输入」）
+                sv.raise_flags(st, m)
+                rec["promotion"] = pr.settle_window(st, m)
+            # ② 生存轨月度推进：状态迁移 + 自我修复
+            rec["survival"] = sv.monthly_tick(st, m)
+            out.append(rec)
+            st.month_log.append(rec)
+        return out
+
+    def next_undone(self, st: GameState) -> str | None:
+        """全量排期（44 节点）里下一个未完成的。
+
+        ⚠ 服务层的会话推进**不用**这个 —— 它按剧本全量 schedule 走，
+        而 Godot 目前只提供 19 个节点，用它会卡在缺失节点上永远前进不了。
+        Service 走映射表的 playableOrder。这里保留给「覆盖度对账」用。
+        """
+        done = set(st.events_done)
+        return next((e for e in self.sched_order if e not in done), None)
+
+
+class ReportInput:
+    """喂给 report.build() 的输入壳。
+
+    报告层的签名收 `simulation.RunResult`（要 `result.state` 与
+    `result.log.months` / `result.log.tracking`），但服务层是逐事件推进的，
+    没有跑批那份逐月日志。这里只把**真实可得**的部分装进去，缺的留空 ——
+    绝不用估算值顶替：报告层对空输入本来就按「证据不足」处理（算法册 §6 允许）。
+    """
+
+    class _Log:
+        def __init__(self, months: list, tracking: list):
+            self.months = months
+            self.tracking = tracking
+
+    def __init__(self, state: GameState, months: list, tracking: list):
+        self.state = state
+        self.log = ReportInput._Log(months, tracking)
+
+
+class Service:
+    def __init__(self, store: Store, engine: Engine, mapping: id_map.StoryKeyMap):
+        self.store = store
+        self.engine = engine
+        self.mapping = mapping
+        self._chat_lock = threading.Lock()
+
+    # ---- 推进口径
+    def _next_step(self, st: GameState) -> str | None:
+        """客户端当前该走的下一步（引擎键）。
+
+        用映射表的 playableOrder，**不是**引擎的全量 schedule：
+        Godot 侧目前只提供 44 个测评节点里的 19 个，按全量 schedule 校验会在
+        缺失节点上永久卡死（实测第 9 件起全部 409，因为第 9 位是成就节点 C1）。
+        缺失节点在报告层自然表现为「证据不足」——算法册 §6 本来就允许「没说」。
+        playableOrder 随剧情补齐逐件变长，全部补齐就等价于全量 schedule。
+        """
+        return self.mapping.next_playable(set(st.events_done))
+
+    def _scheduled_month(self, engine_key: str) -> int:
+        return self.engine.sched_month[engine_key]
+
+    def _client_label(self, engine_key: str | None) -> str | None:
+        """引擎键 → 回给客户端的叙事 id。映射表查不到才退回契约口径拼装。"""
+        if not engine_key:
+            return None
+        return self.mapping.client_id(engine_key) or \
+            id_map.engine_to_story(engine_key, self.engine.act_number(engine_key))
+
+    # ---- 响应组装
+    def _session_state(self, sid: str, st: GameState) -> dict:
+        regions = ["A", "H"] + [r for r in self.store.region_ids(sid) if r not in ("A", "H")]
+        nxt = self._next_step(st)
+        if nxt:
+            current = self._client_label(nxt)
+        elif st.events_done:
+            current = self._client_label(st.events_done[-1])
+        else:
+            current = "M1-E01"
+        return {
+            "chapterId": f"M{max(1, (st.month - 1) // 12 + 1)}",
+            "currentNodeId": current,
+            "completedStoryIds": self.store.story_ids(sid),
+            "skippedStoryIds": [self._client_label(key) for key in st.events_skipped],
+            "completedActivityIds": [],
+            "unlockedRegionIds": sorted(set(regions)),
+            "energy": st.life,
+            # 职级是**服务端-gameplay 权威值**（2026-09-17 拍板：口径只留一份）。
+            # Godot 只负责显示，本地不算 —— 否则同一个东西会有两份会漂移的真相。
+            "level": st.level,
+            "abilityLevels": self._ability_levels(st),
+            "currentMonth": st.month,
+            "assessmentHistory": [
+                {"month": w["month"], "passed": w["promoted"],
+                 "levelAfter": w["level_after"]}
+                for w in st.promotion_windows
+            ],
+            # 下一次考评落在第几个月。**服务端算**：Godot 不必再抄一份考核月日历，
+            # 否则 §2.3 的七个窗会在两边各写一遍，改一处忘一处。
+            # None（全部考完）时缺席而不是给 0 —— 「没有下一次了」不该显示成「第 0 月」。
+            **({"nextAssessmentMonth": m} if (m := next((x for x in C.PROMOTION_MONTHS
+                                                        if x > st.month), None)) else {}),
+            "npcAffinity": dict(st.npc_affinity),
+            # 显示要用的是这一个（只有 Lv 称号），不是上面那个 0-100 原始分。
+            # npcAffinity 是契约既有字段、给 NPC 记忆的性格推断用，**UI 不读它** ——
+            # free_time_system.json 的红线是「好感对玩家隐藏」。
+            "npcRelationStage": self._relation_stages(st),
+            "survivalState": self._survival_view(st),
+            "flags": {f: True for f in st.flags},
+            "scoreSummary": {"decisions": float(st.seq)},
+            # 版本号跟打分卡走，别写死 —— 硬编码会在换版后骗人
+            "scoringVersion": "v" + str(self.engine.reg.version.get("scoring_cards", "?")),
+        }
+
+    # 五格语义（开发文档 4.19）：1 还没人见过你做 / 2 有人带能做 / 3 能独立做小事
+    # / 4 能独立扛一块 / 5 别人来问你。起点是"第一天入职"，不是"半熟手"。
+    ABILITY_BASELINE = {
+        "technical": 1, "collaboration": 1, "expression": 1,
+        "integrity": 2, "resilience": 1,
+    }
+
+    @staticmethod
+    def _ability_tier(points: int) -> int:
+        """攒到的能力点数 → 往上长几格（开发文档 4.19，2026-10-28 改贵）：
+        0–1 点不长、2–4 点长 1、5–8 点长 2、9 点以上长 3。
+        全年必玩里能挂标签的选择只有 17 次，旧曲线（1/3/6/10）会让专攻一路的人
+        第 8 月就顶到封顶，后半年变成死条。"""
+        for threshold, tier in ((9, 3), (5, 2), (2, 1)):
+            if points >= threshold:
+                return tier
+        return 0
+
+    def _ability_levels(self, st: GameState) -> dict[str, int]:
+        groups = {
+            "technical": ("technical", "technical_decision", "architecture"),
+            "collaboration": ("collaboration", "communication"),
+            "expression": ("expression", "assertiveness"),
+            "integrity": ("integrity",),
+            "resilience": ("resilience",),
+        }
+        levels: dict[str, int] = {}
+        for name, keys in groups.items():
+            points = sum(st.ability_points.get(key, 0) for key in keys)
+            # 点数最多抬到第 4 格：第 5 格（"别人来问你"）只由剧情点亮，见 ability_peak。
+            levels[name] = min(4, self.ABILITY_BASELINE[name] + self._ability_tier(points))
+            if name in st.ability_peak:
+                levels[name] = 5
+        return levels
+
+    @staticmethod
+    def _relation_stages(st: GameState) -> dict[str, str]:
+        """引擎侧 npc_level(int) → 契约的 "Lv1".."Lv5" 字符串。
+
+        没有关系系统的 NPC（陈工 relation:false）本来就不在 npc_level 里，
+        下发自然是缺席 —— 正好对上契约「NPCs without a relation system are absent」。
+        """
+        return {k: f"Lv{int(v)}" for k, v in st.npc_level.items() if int(v) >= 1}
+
+    @staticmethod
+    def _survival_view(st: GameState) -> dict:
+        """生存轨的玩家可见视图（剧情册 §2.4 明示原则，最高优先级红线）。
+
+        三件套缺一不可：现在叫什么、为什么会走到这里、还剩多少余地。
+        ⚠ 全部是行为语言：**不出现 strike 计数、不出现阈值**
+        （§2.3「阈值数字永不出现」+ §2.4「用文字，不用数字和血条」）。
+        因此自我修复的进度也只给一句话的分档，不给「还剩 N 个月」。
+        """
+        state = st.survival_state
+        recent = list(st.incidents[-5:])
+        view = {
+            "state": state,
+            "label": C.SURVIVAL_CN.get(state, state),
+            # 逐条引具体事件编号（§2.4 要求：「第 3 月的 PR、第 19 月的事故」）
+            "reasons": [f"第 {i.get('month', '?')} 月 · {C.reason_cn(str(i.get('reason', '')))}"
+                        for i in recent],
+        }
+        # 降级必预警（§2.4 铁律 3）：不存在跳变死亡，进危急必须说清下一步
+        view["warning"] = {
+            "observation": "再出一次岔子，就会有人正式来找你谈。",
+            "critical": "再一次重大失误，就会被叫去正式谈话。",
+            "last_talk": "谈话已经约下了 —— 该决定怎么走。",
+            "exited": "这条路已经走完。",
+        }.get(state, "")
+        # 自我修复的余地也说清楚（§2.4 保护条款：连续 6 个月无失误回升一级）
+        clean = int(st.months_since_mistake)
+        if clean <= 0:
+            view["healingLine"] = ""
+        elif clean <= 2:
+            view["healingLine"] = "出了那件事之后，还没稳住太久。"
+        elif clean <= 4:
+            view["healingLine"] = "连着几个月干净，气氛缓过来了。"
+        else:
+            view["healingLine"] = "快翻篇了 —— 再稳几个月，之前的账就不提了。"
+        return view
+
+    def session_response(self, sid: str, content_version: str, st: GameState) -> dict:
+        return {"sessionId": sid, "contentVersion": content_version,
+                "state": self._session_state(sid, st)}
+
+    # ---- 端点
+    def create_session(self, body: dict) -> tuple[int, dict]:
+        resume = str(body.get("resumeSessionId") or "")
+        if resume:
+            row = self.store.get_session(resume)
+            if row is None:
+                return 404, {"error": "unknown sessionId"}
+            return 200, self.session_response(
+                resume, row["content_version"], Engine.state_from_json(row["state_json"]))
+        content_version = str(body.get("contentVersion") or "v1")
+        st = self.engine.new_state()
+        sid = self.store.create_session(content_version, Engine.state_to_json(st))
+        return 201, self.session_response(sid, content_version, st)
+
+    def get_session(self, sid: str) -> tuple[int, dict]:
+        row = self.store.get_session(sid)
+        if row is None:
+            return 404, {"error": "unknown sessionId"}
+        st = Engine.state_from_json(row["state_json"])
+        return 200, self.session_response(sid, row["content_version"], st)
+
+    def next_node(self, sid: str) -> tuple[int, dict]:
+        row = self.store.get_session(sid)
+        if row is None:
+            return 404, {"error": "unknown sessionId"}
+        st = Engine.state_from_json(row["state_json"])
+        nxt = self._next_step(st)
+        if nxt is None:
+            return 200, {"nodeId": "END", "nodeType": "finished",
+                         "regionId": "A", "title": "48 个月走完了"}
+        ev = self.engine.reg.events[nxt]
+        client_id = self._client_label(nxt)
+        # choiceId 用客户端的叙事 id 拼（Godot 的 _contract_choice_id 同形），
+        # 后端收到后会先经映射表归一再进引擎。
+        #
+        # ⚠ 这里的 title / choices[].text 直接来自打分卡，是契约既有设计
+        #   （§「证据不足就静默」那条不覆盖本端点）。但算法册 §1 的红线是
+        #   「scoring_cards 不得下发前端」—— Godot 自带 MAIN_EVENTS 文案，
+        #   并不调本端点，所以目前不冲突。若将来有瘦客户端要用它，
+        #   应该改成只回结构（id + 选项数），文案由客户端自己出。
+        choices = [{"choiceId": f"{client_id}-C{i + 1:02d}",
+                    "text": opt.get("text", "")}
+                   for i, opt in enumerate(ev.options.values())]
+        return 200, {
+            "nodeId": client_id,
+            "nodeType": "main_story",
+            "regionId": "A",
+            "title": ev.title,
+            "body": "",
+            "choices": choices,
+        }
+
+    def settle_assessment(self, sid: str, month: int) -> tuple[int, dict]:
+        with _lock:
+            row = self.store.get_session(sid)
+            if row is None:
+                return 404, {"error": "unknown sessionId"}
+            if month not in C.PROMOTION_MONTHS:
+                return 400, {"error": "not an assessment month"}
+            st = Engine.state_from_json(row["state_json"])
+            if month not in st.settled_months:
+                next_key = self._next_step(st)
+                if next_key is not None and self._scheduled_month(next_key) <= month:
+                    return 409, {"error": "earlier story nodes are incomplete",
+                                 "expected": self._client_label(next_key)}
+                st.month = max(st.month, month)
+                self.engine.settle_months_tail(st)
+                self.store.save_state(sid, Engine.state_to_json(st))
+            result = next(w for w in st.promotion_windows if w["month"] == month)
+            tracking = self._report_tracking(sid, st)
+            window_tracking = [item for item in tracking
+                               if month - 6 < (item.get("month") or 0) <= month]
+            return 200, {
+                "month": month, "passed": result["promoted"],
+                "levelAfter": result["level_after"],
+                "assessmentSummary": {
+                    "cumulativePassed": result["cumulative"]["pass"],
+                    "behaviorPassed": result["behavior"]["pass"],
+                    "defensePassed": result["defense"]["pass"],
+                },
+                "interactionEvidence": self._interaction_trace(window_tracking),
+                "state": self._session_state(sid, st),
+            }
+
+    def post_event(self, sid: str, body: dict) -> tuple[int, dict]:
+        with _lock:
+            return self._post_event_locked(sid, body)
+
+    def _post_event_locked(self, sid: str, body: dict) -> tuple[int, dict]:
+        row = self.store.get_session(sid)
+        if row is None:
+            return 404, {"error": "unknown sessionId"}
+
+        for field in ("eventId", "eventType", "contentVersion", "clientTime", "payload"):
+            if field not in body:
+                return 400, {"error": f"missing required field: {field}"}
+        event_id = str(body["eventId"])
+        event_type = str(body["eventType"])
+        payload = body["payload"] if isinstance(body["payload"], dict) else {}
+        region = payload.get("regionId")
+        if not (isinstance(region, str) and REGION_RE.match(region)):
+            return 400, {"error": "payload.regionId must be one of A..H"}
+
+        # 幂等：同一 eventId 直接回当时的响应
+        prev = self.store.get_event(sid, event_id)
+        if prev is not None:
+            resp = json.loads(prev["response_json"])
+            resp["duplicate"] = True
+            return 200, resp
+
+        st = Engine.state_from_json(row["state_json"])
+        seq = None
+        story_id = str(payload.get("storyId") or "")
+        choice_id = str(payload.get("choiceId") or "")
+
+        if event_type == "action_spent":
+            window_id = str(payload.get("windowId") or "")
+            remaining = _as_int(payload.get("remainingAfter"))
+            if (not window_id or payload.get("activityKind") != "area_activity"
+                    or remaining not in (0, 1, 2)):
+                return 400, {"error": "invalid action_spent payload"}
+            spends = st.window_action_spends.setdefault(window_id, [])
+            if remaining in spends:
+                return 409, {"error": "action point already recorded"}
+            spends.append(remaining)
+            if not st.window_action_bonus_granted and set(spends) == {0, 1, 2}:
+                st.window_cumulative += 1
+                st.window_action_bonus_granted = True
+
+        if event_type == "month_jump":
+            target = _as_int(payload.get("targetMonth"))
+            if (self.mapping.version != "v1.2" or row["content_version"] != "v1.2"
+                    or body["contentVersion"] != "v1.2"):
+                return 409, {"error": "month jump requires a V1.2 session"}
+            if target is None or target <= st.month or target > 48:
+                return 400, {"error": "targetMonth must be a future month within 48"}
+            for key in self.mapping.playable_engine_order():
+                if self._scheduled_month(key) >= target:
+                    break
+                if key not in st.events_done:
+                    st.events_done.append(key)
+                    st.events_skipped.append(key)
+            st.month = target - 1
+            self.engine.settle_months_tail(st)
+            st.month = target
+
+        # ---- ① 纯叙事成就节点（C1/C2/C3）的推进通道
+        # 这三个节点 no_decision=True、options 为空，永远走不进 CHOICE_TAPS。
+        # 没有这条分支，_next_step 会一直停在 C1，它后面的节点全部 409 ——
+        # 实测「Godot 走完第 8 件就再也过不去」就是这个原因。
+        # 这一档只把节点记进 events_done：不调 settle、不加 seq、不进 decisions，
+        # 因为成就演出本来就不测评（算法册：纯演出无 marker）。
+        elif event_type == "achievement_view" and story_id:
+            a_key = self.mapping.scoring_key(story_id)
+            a_ev = self.engine.reg.events.get(a_key or "")
+            if a_ev is not None and a_ev.is_achievement and not a_ev.has_decision:
+                if a_key not in st.events_done:
+                    nxt = self._next_step(st)
+                    if a_key != nxt:
+                        return 409, {"error": "story state conflict",
+                                     "expected": self._client_label(nxt),
+                                     "got": story_id}
+                    st.events_done.append(a_key)
+
+        # ---- ② 选择事件
+        elif event_type in CHOICE_TAPS and story_id and choice_id:
+            align = self.mapping.align(story_id)
+            if align == id_map.ALIGN_PENDING:
+                # 编号对上了、选项还没对上。宁可 409 也说清楚，绝不退回正则瞎猜 ——
+                # 「按同名选项记分」正是把善意选项记成越界选项的原因。
+                return 409, {
+                    "error": f"{story_id} 的选项尚未对齐，不能进测评",
+                    "align": align,
+                    "storyId": story_id,
+                    "scoringKey": self.mapping.scoring_key(story_id),
+                    "todo": self.mapping.todo(story_id),
+                }
+            if align != id_map.ALIGN_NON_SCORING:
+                engine_key = self.mapping.scoring_key(story_id)
+                if engine_key is None or engine_key not in self.engine.reg.events:
+                    return 400, {"error": f"unknown storyId: {story_id}"}
+                option = self.mapping.option_key(story_id, choice_id)
+                if option is None or option not in self.engine.reg.events[engine_key].options:
+                    return 400, {"error": f"unknown choiceId: {choice_id}"}
+                done = set(st.events_done)
+                if engine_key in done:
+                    return 409, {"error": "event already settled"}
+                nxt = self._next_step(st)
+                if engine_key != nxt:
+                    return 409, {"error": "story state conflict",
+                                 "expected": self._client_label(nxt)}
+                self.engine.settle_mainline(st, engine_key, option,
+                                            _as_int(payload.get("hesitationMs")),
+                                            _as_int(payload.get("switchCount")),
+                                            self._scheduled_month(engine_key))
+                seq = st.seq
+            # ALIGN_NON_SCORING（熊熊有招训练对局这类 Godot 自创事件）：
+            # 玩家确实做完了剧情，所以照常落库、进 completedStoryIds，
+            # 但不进引擎结算 —— 只落日志不算账。
+
+        with self.store.conn:
+            self.store.conn.execute(
+                "INSERT INTO events VALUES(?,?,?,?,?,?,?,?)",
+                (sid, event_id, seq, event_type, str(body["clientTime"]),
+                 json.dumps(payload, ensure_ascii=False), "{}", now_iso()))
+            self.store.conn.execute(
+                "UPDATE sessions SET state_json=? WHERE session_id=?",
+                (Engine.state_to_json(st), sid))
+            state = self._session_state(sid, st)
+            resp = {
+                "eventId": event_id,
+                "accepted": True,
+                "state": state,
+                "nextNodeId": self._client_label(self._next_step(st)),
+            }
+            self.store.conn.execute(
+                "UPDATE events SET response_json=? WHERE session_id=? AND event_id=?",
+                (json.dumps(resp, ensure_ascii=False), sid, event_id))
+            if event_type != "report_view":
+                self.store.conn.execute("DELETE FROM reports WHERE session_id=?", (sid,))
+        return 200, resp
+
+    def npc_memories(self, sid: str, npc_id: str, layers: list[str] | None,
+                     limit: int) -> tuple[int, dict]:
+        row = self.store.get_session(sid)
+        if row is None:
+            return 404, {"error": "unknown sessionId"}
+        if npc_id not in NPC_IDS:
+            return 404, {"error": f"unknown npcId: {npc_id}"}
+        st = Engine.state_from_json(row["state_json"])
+        want = set(layers or ["fact", "relation", "state", "social"])
+
+        # seq → 上报时的客户端 eventId（MemoryRef/NpcMemory 的 eventRef 都要指回它）
+        seq_to_client: dict[int, str] = {}
+        with _lock:
+            rows = self.store.conn.execute(
+                "SELECT seq, event_id, payload_json FROM events WHERE session_id=?",
+                (sid,)).fetchall()
+        for r in rows:
+            if r["seq"] is not None:
+                seq_to_client[int(r["seq"])] = r["event_id"]
+
+        items: list[dict] = []
+
+        # fact 层：决策记忆标签（决策流推导，不落库）
+        if "fact" in want:
+            for d in st.decisions:
+                tags = list(d.memory_tags or [])
+                if not tags:
+                    continue
+                ev_ref = seq_to_client.get(d.seq, str(uuid.uuid4()))
+                for t in tags:
+                    items.append({
+                        "npcId": npc_id, "layer": "fact", "kind": "memory_tag",
+                        "month": d.month, "seq": d.seq,
+                        "fact": f"第 {d.seq} 个决策点（{d.node_id}）你选择了「{d.option_text}」——{t}",
+                        "eventRef": ev_ref,
+                    })
+
+        # relation 层：该 NPC 的好感变动（按决策重放 affinity，确定性与引擎一致）
+        if "relation" in want:
+            for d in st.decisions:
+                ev = self.engine.reg.events.get(d.node_id)
+                if ev is None:
+                    continue
+                opt = (ev.options.get(d.option_id) or {})
+                aff = opt.get("affinity")
+                if isinstance(aff, dict) and aff.get("npc") == npc_id:
+                    ev_ref = seq_to_client.get(d.seq, str(uuid.uuid4()))
+                    delta = int(aff.get("delta", 0))
+                    items.append({
+                        "npcId": npc_id, "layer": "relation", "kind": "affinity",
+                        "month": d.month, "seq": d.seq,
+                        "fact": f"好感度 {'+' if delta >= 0 else ''}{delta}（{d.node_id}.{d.option_id}）",
+                        "eventRef": ev_ref,
+                    })
+
+        # state 层：处境事实（事故/倦怠，行为语言）
+        if "state" in want:
+            for inc in st.incidents:
+                items.append({
+                    "npcId": npc_id, "layer": "state", "kind": "incident",
+                    "month": inc.get("month", 0), "seq": 0,
+                    "fact": str(inc.get("reason", "处境变化")),
+                    "eventRef": str(uuid.uuid4()),
+                })
+
+        # social 层：闲聊进游戏记忆流（/chat 未实现前恒为空）
+        if "social" in want:
+            for row in self.store.event_stream(sid):
+                if row["event_type"] != "npc_dialogue_complete":
+                    continue
+                payload = json.loads(row["payload_json"] or "{}")
+                if str(payload.get("npcId", "")) != npc_id:
+                    continue
+                message = str(payload.get("message", "")).strip()
+                if not message:
+                    continue
+                items.append({
+                    "npcId": npc_id, "layer": "social", "kind": "player_message",
+                    "month": _as_int(payload.get("month")) or st.month, "seq": 0,
+                    "fact": message, "eventRef": row["event_id"],
+                })
+                chat_response = payload.get("chatResponse") or {}
+                if isinstance(chat_response, dict) and chat_response.get("reply"):
+                    items.append({
+                        "npcId": npc_id, "layer": "social", "kind": "npc_reply",
+                        "month": _as_int(payload.get("month")) or st.month, "seq": 0,
+                        "fact": str(chat_response["reply"]), "eventRef": row["event_id"],
+                    })
+
+        # 只保留能指回客户端 eventId 的条目（seq 作键查，不是查 eventId 集合）
+        items = [i for i in items if i["seq"] == 0 or i["seq"] in seq_to_client]
+        items.sort(key=lambda x: (-x["seq"], x["month"]))
+        stage = f"Lv{st.npc_level.get(npc_id, 1)}"
+        return 200, {"npcId": npc_id, "relationStage": stage, "items": items[:limit]}
+
+    def npc_chat(self, sid: str, npc_id: str, body: dict) -> tuple[int, dict]:
+        if not isinstance(body, dict):
+            return 400, {"error": "invalid chat request"}
+        if npc_id not in npc_chat.NPCS:
+            return 404, {"error": f"unknown npcId: {npc_id}"}
+        session = self.store.get_session(sid)
+        if session is None:
+            return 404, {"error": "unknown sessionId"}
+        event_id = str(body.get("eventId") or "")
+        message = str(body.get("text") or "").strip()
+        if (not event_id or not body.get("clientTime") or not message
+                or len(message) > 500 or body.get("contentVersion") != session["content_version"]):
+            return 400, {"error": "invalid chat request"}
+        with self._chat_lock:
+            event = self.store.get_event(sid, event_id)
+            if event is None:
+                npc = npc_chat.NPCS[npc_id]
+                code, result = self.post_event(sid, {
+                    "eventId": event_id, "eventType": "npc_dialogue_complete",
+                    "contentVersion": body["contentVersion"], "clientTime": body["clientTime"],
+                    "payload": {"regionId": npc["zone"], "npcId": npc_id,
+                                "message": message, "messageLength": len(message),
+                                "month": self.engine.state_from_json(session["state_json"]).month or 1},
+                })
+                if code != 200:
+                    return code, result
+                event = self.store.get_event(sid, event_id)
+            if event["event_type"] != "npc_dialogue_complete":
+                return 409, {"error": "eventId belongs to another event type"}
+            payload = json.loads(event["payload_json"])
+            if payload.get("npcId") != npc_id or payload.get("message") != message:
+                return 409, {"error": "eventId belongs to another chat message"}
+            if isinstance(payload.get("chatResponse"), dict):
+                return 200, payload["chatResponse"]
+            _, memories = self.npc_memories(sid, npc_id, None, 100)
+            refs = npc_chat.memory_refs(memories["items"], message, event_id)
+            reply, source = npc_chat.reply(npc_chat.NPCS[npc_id], message, refs)
+            result = {
+                "eventId": event_id, "reply": reply, "generatedBy": source,
+                "memoryRefs": refs, "relationStage": memories["relationStage"],
+            }
+            payload["chatResponse"] = result
+            self.store.update_event_payload(sid, event_id, payload)
+            return 200, result
+
+    # ---- 报告层（算法在 app.report，这里只喂料）
+    def _report_tracking(self, sid: str, st: GameState) -> list[dict]:
+        """把落库事件流还原成报告层要的 tracking。
+
+        报告层的「冲刺与伪装」模块吃两类轨迹：
+          - explore_click：自由周末的组团与同伴（真实埋点，从 events 表还原）
+          - promotion_window：考核窗（账本里的真实状态，不是埋点，直接合成同形条目）
+        另还原 encounter_choice（在场一幕应答）→ 报告层的性格回声（encounterEchoes）。
+        服务层收不到的（比如还没实现的埋点）就不出现 —— 对应的分析自然为空。
+        """
+        tracking: list[dict] = []
+        for row in self.store.event_stream(sid):
+            if row["event_type"] == "action_spent":
+                payload = json.loads(row["payload_json"] or "{}")
+                tracking.append({
+                    "tap": "action_spent", "month": _as_int(payload.get("month")) or st.month,
+                    "activityId": payload.get("activityId"),
+                    "activityKind": payload.get("activityKind"),
+                    "windowId": payload.get("windowId"),
+                })
+                continue
+            if row["event_type"] == "npc_dialogue_complete":
+                payload = json.loads(row["payload_json"] or "{}")
+                tracking.append({
+                    "tap": "npc_dialogue", "month": _as_int(payload.get("month")) or st.month,
+                    "npcId": payload.get("npcId"),
+                    "message": payload.get("message", ""),
+                    "messageLength": _as_int(payload.get("messageLength")) or 0,
+                })
+                continue
+            if row["event_type"] == "training_result":
+                payload = json.loads(row["payload_json"] or "{}")
+                result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+                tracking.append({
+                    "tap": "training_result", "month": _as_int(payload.get("month")) or st.month,
+                    "activityId": payload.get("activityId"),
+                    "outcome": result.get("outcome", "unknown"),
+                    "rounds": _as_int(result.get("rounds")),
+                })
+                continue
+            if row["event_type"] == "encounter_choice":
+                payload = json.loads(row["payload_json"] or "{}")
+                tags = payload.get("memoryTags")
+                tracking.append({
+                    "tap": "encounter_choice",
+                    "month": payload.get("month"),
+                    "activityId": payload.get("activityId"),
+                    "npcId": payload.get("npcId"),
+                    "optionId": payload.get("optionId"),
+                    "memoryTags": tags if isinstance(tags, list) else [],
+                })
+                continue
+            if row["event_type"] != "explore_click":
+                continue
+            payload = json.loads(row["payload_json"] or "{}")
+            month = _as_int(payload.get("slotIndex"))
+            if month:
+                targets = payload.get("targets")
+                tracking.append({
+                    "tap": "explore_click", "month": month,
+                    "targets": targets if isinstance(targets, list) else [],
+                    "activityId": payload.get("activityId"),
+                })
+        for w in st.promotion_windows:
+            tracking.append({"tap": "promotion_window", "month": w["month"],
+                             "passed": w["promoted"]})
+        return tracking
+
+    @staticmethod
+    def _interaction_trace(tracking: list[dict]) -> dict:
+        actions = [x for x in tracking if x.get("tap") == "action_spent"]
+        chats = [x for x in tracking if x.get("tap") == "npc_dialogue"]
+        trainings = [x for x in tracking if x.get("tap") == "training_result"]
+        by_kind: dict[str, int] = {}
+        by_npc: dict[str, int] = {}
+        for item in actions:
+            kind = str(item.get("activityKind") or "unknown")
+            by_kind[kind] = by_kind.get(kind, 0) + 1
+        for item in chats:
+            npc_id = str(item.get("npcId") or "unknown")
+            by_npc[npc_id] = by_npc.get(npc_id, 0) + 1
+        return {
+            "actionCount": len(actions),
+            "actionsByKind": by_kind,
+            "dialogueCount": len(chats),
+            "dialogueByNpc": by_npc,
+            "trainingResults": [
+                {"outcome": x.get("outcome", "unknown"), "rounds": x.get("rounds")}
+                for x in trainings
+            ],
+            "scoringNote": "同一行动力窗口用完 3 点，可为所在考核窗增加 1 点累积；每个考核窗最多一次。对话正文和训练胜负不直接计分。",
+        }
+
+    def _self_ratings(self, sid: str) -> dict[str, float] | None:
+        """建档自评（0-10）。profile_answer 埋点尚未采集 → 现在恒为 None，
+        大五只有行为一列、不出后验与矛盾度。埋点一落地这里自动生效。"""
+        for row in self.store.event_stream(sid):
+            if row["event_type"] != "profile_answer":
+                continue
+            payload = json.loads(row["payload_json"] or "{}")
+            ratings = payload.get("ratings") or payload.get("selfRatings")
+            if isinstance(ratings, dict) and ratings:
+                out: dict[str, float] = {}
+                for k, v in ratings.items():
+                    try:
+                        out[str(k).upper()] = float(v)
+                    except (TypeError, ValueError):
+                        continue
+                return out or None
+        return None
+
+    def generate_report(self, sid: str) -> tuple[int, dict]:
+        with _lock:
+            return self._generate_report_locked(sid)
+
+    def _generate_report_locked(self, sid: str) -> tuple[int, dict]:
+        """POST /report。契约写的是异步（202 + 状态），但生成是纯模板、毫秒级、无大模型
+        → 同步算完如实回 ready，不伪造 pending/generating 中间态。
+        幂等：已成片就返回同一 handle，不重算（契约「请求两次返回同一个 handle」）。"""
+        row = self.store.get_session(sid)
+        if row is None:
+            return 404, {"error": "unknown sessionId"}
+        st = Engine.state_from_json(row["state_json"])
+        if not st.events_done or self._next_step(st) is not None or st.month < 48:
+            return 409, {"error": "final story not complete"}
+        prev = self.store.get_report(sid)
+        if prev is not None and prev["status"] == "ready":
+            cached = json.loads(prev["payload_json"] or "{}")
+            if cached.get("portraitVersion") == 2:
+                return 202, {"sessionId": sid, "status": "ready"}
+
+        try:
+            report = build_report(
+                ReportInput(st, st.month_log, self._report_tracking(sid, st)),
+                self.engine.reg,
+                self_ratings=self._self_ratings(sid),
+                session_id=sid,
+            )
+            report["skippedStoryIds"] = [self._client_label(key) for key in st.events_skipped]
+            report["interactionEvidence"] = self._interaction_trace(self._report_tracking(sid, st))
+        except Exception as exc:  # 生成失败要留痕，但不把内部堆栈泄漏给客户端
+            self.store.save_report(sid, "failed", type(exc).__name__, "", None)
+            sys.stdout.write("[api] report build failed: %r\n" % (exc,))
+            return 202, {"sessionId": sid, "status": "failed",
+                         "reason": "报告生成失败，详见服务端日志"}
+        self.store.save_report(sid, "ready", "",
+                               json.dumps(report, ensure_ascii=False),
+                               report["generatedAt"])
+        return 202, {"sessionId": sid, "status": "ready"}
+
+    def report_status(self, sid: str) -> tuple[int, dict]:
+        if self.store.get_session(sid) is None:
+            return 404, {"error": "unknown sessionId"}
+        row = self.store.get_report(sid)
+        if row is None:
+            return 200, {"sessionId": sid, "status": "pending"}
+        out = {"sessionId": sid, "status": row["status"]}
+        if row["status"] == "failed" and row["reason"]:
+            out["reason"] = row["reason"]
+        return 200, out
+
+    def get_report(self, sid: str) -> tuple[int, dict]:
+        """GET /report。契约：只有 ready 才 200，其余 404（客户端去轮询 status）。"""
+        if self.store.get_session(sid) is None:
+            return 404, {"error": "unknown sessionId"}
+        row = self.store.get_report(sid)
+        if row is None or row["status"] != "ready" or not row["payload_json"]:
+            return 404, {"error": "report not generated yet"}
+        return 200, json.loads(row["payload_json"])
+
+
+def _as_int(v) -> int | None:
+    if v is None or isinstance(v, bool):
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
+
+
+class Handler(BaseHTTPRequestHandler):
+    service: Service = None  # type: ignore[assignment]
+    WEB_ORIGIN = "https://careertown.invalid"
+    PUBLIC_MODE = os.getenv("WORKPLACE_PUBLIC_MODE") == "1"
+    routes = [
+        re.compile(r"^/api/v1/health$"),
+        re.compile(r"^/api/v1/sessions$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/next$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/events$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/npcs/([\w-]+)/memories$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/report$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/report/status$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/assessments/(\d+)$"),
+        re.compile(r"^/api/v1/sessions/([\w-]+)/npcs/([\w-]+)/chat$"),
+    ]
+
+    def log_message(self, fmt, *args):  # 安静模式由 -v 控制，默认打印一行
+        sys.stdout.write("[api] %s\n" % (fmt % args))
+
+    # ---- helpers
+    def _body(self) -> dict:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            return None
+        if length > 16384:
+            return None
+        if length <= 0:
+            return {}
+        try:
+            return json.loads(self.rfile.read(length).decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            return None
+
+    def _reply(self, code: int, obj: dict) -> None:
+        raw = json.dumps(obj, ensure_ascii=False).encode("utf-8")
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(raw)))
+        if self.headers.get("Origin") == self.WEB_ORIGIN:
+            self.send_header("Access-Control-Allow-Origin", self.WEB_ORIGIN)
+            self.send_header("Vary", "Origin")
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def do_OPTIONS(self):
+        if self.headers.get("Origin") != self.WEB_ORIGIN:
+            self.send_error(403)
+            return
+        self.send_response(204)
+        self.send_header("Access-Control-Allow-Origin", self.WEB_ORIGIN)
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.send_header("Access-Control-Max-Age", "600")
+        self.send_header("Vary", "Origin")
+        self.end_headers()
+
+    def _dispatch(self, method: str) -> None:
+        svc = self.service
+        path = self.path.split("?")[0]
+        query = self.path.split("?")[1] if "?" in self.path else ""
+        m0, m1, m2, m3, m4, m5, m6, m7, m8, m9 = self.routes
+
+        if method == "GET" and m0.match(path):
+            return self._reply(200, {"status": "ok", "time": now_iso()})
+        if method == "POST" and m1.match(path):
+            body = self._body()
+            if body is None:
+                return self._reply(400, {"error": "invalid JSON"})
+            claimed_token = None
+            if self.PUBLIC_MODE:
+                resume = str(body.get("resumeSessionId") or "")
+                if resume:
+                    token = str(body.get("sessionToken") or "")
+                    if not token:
+                        claimed_token = svc.store.claim_legacy_session(resume)
+                    if not claimed_token and not svc.store.verify_access_token(resume, token):
+                        return self._reply(403, {"error": "invalid session token"})
+            code, resp = svc.create_session(body or {})
+            if self.PUBLIC_MODE and code == 201:
+                token = secrets.token_urlsafe(32)
+                svc.store.set_access_token(resp["sessionId"], token)
+                resp["sessionToken"] = token
+            elif self.PUBLIC_MODE and code == 200 and claimed_token:
+                resp["sessionToken"] = claimed_token
+            return self._reply(code, resp)
+        session_path = re.match(r"^/api/v1/sessions/([\w-]+)(?:/|$)", path)
+        if self.PUBLIC_MODE and session_path:
+            authorization = self.headers.get("Authorization", "")
+            token = authorization[7:] if authorization.startswith("Bearer ") else ""
+            if not svc.store.verify_access_token(session_path.group(1), token):
+                return self._reply(403, {"error": "invalid session token"})
+        m = m2.match(path)
+        if method == "GET" and m:
+            return self._reply(*svc.get_session(m.group(1)))
+        m = m3.match(path)
+        if method == "GET" and m:
+            return self._reply(*svc.next_node(m.group(1)))
+        m = m4.match(path)
+        if method == "POST" and m:
+            body = self._body()
+            if body is None:
+                return self._reply(400, {"error": "invalid JSON"})
+            return self._reply(*svc.post_event(m.group(1), body or {}))
+        m = m5.match(path)
+        if method == "GET" and m:
+            layers = None
+            if "layers=" in query:
+                layers = [x for x in query.split("layers=")[1].split("&")[0].split(",") if x]
+            limit = 20
+            if "limit=" in query:
+                try:
+                    limit = max(1, min(100, int(query.split("limit=")[1].split("&")[0])))
+                except ValueError:
+                    pass
+            return self._reply(*svc.npc_memories(m.group(1), m.group(2), layers, limit))
+        m = m6.match(path)
+        if method == "POST" and m:
+            return self._reply(*svc.generate_report(m.group(1)))
+        if method == "GET" and m:
+            return self._reply(*svc.get_report(m.group(1)))
+        m = m7.match(path)
+        if method == "GET" and m:
+            return self._reply(*svc.report_status(m.group(1)))
+        m = m8.match(path)
+        if method == "POST" and m:
+            return self._reply(*svc.settle_assessment(m.group(1), int(m.group(2))))
+        m = m9.match(path)
+        if method == "POST" and m:
+            body = self._body()
+            if body is None:
+                return self._reply(400, {"error": "invalid JSON"})
+            return self._reply(*svc.npc_chat(m.group(1), m.group(2), body or {}))
+        return self._reply(404, {"error": "no route"})
+
+    def do_GET(self):
+        self._dispatch("GET")
+
+    def do_POST(self):
+        self._dispatch("POST")
+
+
+def build_service(db_path: Path | None = None,
+                  mapping_path: Path | None = None,
+                  story_version: str = "legacy") -> Service:
+    selected_map = mapping_path or (STORY_KEY_MAP_V12_PATH if story_version == "v1.2"
+                                    else STORY_KEY_MAP_PATH)
+    return Service(
+        Store(db_path or DB_PATH),
+        Engine(story_version),
+        id_map.StoryKeyMap.load_or_empty(selected_map),
+    )
+
+
+def main() -> None:
+    svc = build_service(story_version="v1.2")
+    Handler.service = svc
+    server = ThreadingHTTPServer(("127.0.0.1", PORT), Handler)
+    cov = svc.mapping.coverage()
+    print(f"[api] workplace-town M4 minimal server on http://127.0.0.1:{PORT}/api/v1 "
+          f"(db={DB_PATH})")
+    print(f"[api] 映射表 v{svc.mapping.version}：可连续承接 {len(svc.mapping.playable_engine_order())} 个节点"
+          + (f"，Godot 已对齐 {cov.get('aligned')}/{cov.get('godotEvents')} 件、"
+             f"覆盖打分卡 {cov.get('scoringNodes')}/{cov.get('scoringNodesTotal')} 个节点"
+             if cov else ""))
+    server.serve_forever()
+
+
+if __name__ == "__main__":
+    main()
