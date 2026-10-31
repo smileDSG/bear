@@ -8,10 +8,10 @@
 
 ## 两个仓库
 
-- 本目录 `E:\03_Projects\bear` 是**文档仓**：三册、素材、归档、`_bak_*` 手工备份。根 `.gitignore` 把 `workplace_town/` 整体忽略。
+- 本目录 `E:\03_Projects\bear` 是**文档仓**：三册、素材、归档、`_bak_*` 手工备份；主分支另存一份 `workplace_town/` 的当前版本快照，用于 GitHub 备份（2026-10-31 并入）。
 - `workplace_town/` 是**游戏仓**（有自己的 `.git`）：Godot 工程、剧情数据、Python 后端、测试都在这里。改代码、跑测试先 `cd workplace_town`。
 - `workplace_town/AGENTS.md` 是游戏仓侧的说明；代码工作以它为准，本文件负责两仓关系和三册口径。
-- 两仓分开提交，不要把根仓和游戏仓混进同一个提交。
+- 游戏开发仍以 `workplace_town/` 自己的提交为准；根仓里的 `workplace_town/` 是快照。不要在根仓直接改游戏代码，也不要把快照和文档改动混进同一个提交；快照过期时重新同步。
 
 ## 三册是地基
 
