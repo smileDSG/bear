@@ -17,3 +17,55 @@ story_review_render/
 Thumbs.db
 desktop.ini
 .DS_Store
+
+# WorkBuddy 项目数据：不是缓存，是项目记忆，禁止入库
+.workbuddy/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
+# 前端依赖：可 npm install 重建，不入库
+node_modules/
+
+# 手工备份：按 AGENTS.md 保留在本地，不入库
+_bak_*/
+_bak_*/
+
+# 两份本地游戏仓副本（约 7GB，与已跟踪的 workplace_town 快照重复）
+workplace_town_main_latest/
+workplace_town_sjl_build/
+
+# 过程脚本与临时产物（下划线开头的一次性脚本、临时文件）
+_button_*.py
+_build_doc.py
+_cover_*.py
+_patch_*.py
+_check_app_profile.py
+_clean_media.py
+_exit_*.py
+_gallery_*.py
+_make_diagrams.py
+_paren_patch.py
+_pck_check.py
+_probe_selfreport.py
+_scan_wording.py
+_tpz_parallel.py
+_verify_*.py
+_appendix_patch.py
+_tmp_*/
+_tmp_*
+# 例外：这是小熊镇自习室的产品方案，属于保留资产
+!_tmp_xiaoxiong_plan.docx
+tmp_*.log
+tmp_review4/
+test_artifacts/
+
+# 单次使用截图 / 渲染中间物
+title_shot*.png
+device_title*.jpeg
+btn_on.png
+btn_off.png
+
+# 下载的外部参考文档（非本项目资产）
+shared_1113_*.docx

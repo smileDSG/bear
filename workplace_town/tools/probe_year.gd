@@ -34,16 +34,6 @@ func _ready() -> void:
 		# 从 11 月翻进来时 phase 还停在上月末的 done；要等 12 月真开演过才算走完。
 		if month >= 12 and phase != "done":
 			_m12_started = true
-		if month >= 12 and phase != _m12_last_phase:
-			print("[年] 12 月 phase：", _m12_last_phase, " → ", phase)
-			_m12_last_phase = phase
-		if month >= 12 and phase == "month_nodes" and not _m12_debug:
-			_m12_debug = true
-			var runner = _town.get("_month_runner")
-			var ids: Array = []
-			for nv in (runner.get("nodes") as Array):
-				ids.append(String((nv as Dictionary).get("id", "")))
-			print("[年] 12 月节点表 ", ids.size(), " 个：", ids)
 		# 月中那一觉也会把 phase 短暂设成 done（黑场里翻日）；要连续 done 够久才算真收工。
 		if month >= 12 and phase == "done" and _m12_started:
 			_m12_done_ticks += 1
@@ -65,6 +55,11 @@ func _ready() -> void:
 		else:
 			_stall_ticks = 0
 			_last_sig = sig
+		# 月末卡收尾那几秒也是在 done 上等（本局的结束态），不算卡住。
+		var runner_now = _town.get("_month_runner")
+		var closing_now := runner_now != null and String((runner_now.get("current") as Dictionary).get("id", "")) == "M12_CLOSE"
+		if closing_now:
+			_stall_ticks = 0
 		if _stall_ticks > 150:
 			var stuck_ev: Dictionary = _panel.get("_event")
 			var run = _town.get("_month_runner")
@@ -181,8 +176,6 @@ func _ready() -> void:
 
 var _month_screens := {}
 var _m12_started := false
-var _m12_debug := false
-var _m12_last_phase := ""
 var _m12_done_ticks := 0
 
 

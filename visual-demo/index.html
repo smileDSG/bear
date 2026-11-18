@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>小熊镇自习室 · 2D 动画版小样</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    height: 100vh;
+    overflow: hidden;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #1a1512;
+    user-select: none;
+  }
+
+  .scene {
+    position: relative;
+    width: 100vw;
+    height: 100vh;
+    overflow: hidden;
+    transition: filter 1s ease;
+  }
+
+  /* 背景：推拉 + 视差 + 景深 */
+  .bg {
+    position: absolute;
+    inset: -70px;
+    background-image: url('assets/library.png');
+    background-size: cover;
+    background-position: center 42%;
+    filter: blur(2px) brightness(0.82) saturate(1.05);
+    transform: translate(var(--px, 0px), var(--py, 0px)) scale(var(--zoom, 1.04));
+    transition: filter 1s ease;
+    animation: cameradrift 16s ease-in-out infinite;
+  }
+  @keyframes cameradrift {
+    0%, 100% { background-position: center 42%; }
+    50% { background-position: 48% 40%; }
+  }
+
+  .vignette {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 30%, rgba(20,12,8,0.55) 100%);
+    pointer-events: none;
+    transition: background 1s ease;
+  }
+
+  /* 飘动的光斑，让环境不是死的 */
+  .dust { position: absolute; border-radius: 50%; pointer-events: none; }
+  .d1 { left: 22%; top: 30%; width: 8px; height: 8px; background: rgba(255,224,170,0.5); animation: float1 13s ease-in-out infinite; }
+  .d2 { left: 68%; top: 22%; width: 5px; height: 5px; background: rgba(255,224,170,0.45); animation: float2 17s ease-in-out infinite; }
+  .d3 { left: 76%; top: 48%; width: 7px; height: 7px; background: rgba(255,214,150,0.4); animation: float1 15s ease-in-out infinite 3s; }
+  .d4 { left: 30%; top: 55%; width: 4px; height: 4px; background: rgba(255,230,180,0.4); animation: float2 19s ease-in-out infinite 2s; }
+  @keyframes float1 { 0%,100% { transform: translate(0,0); opacity: 0.3; } 50% { transform: translate(24px,-30px); opacity: 0.9; } }
+  @keyframes float2 { 0%,100% { transform: translate(0,0); opacity: 0.2; } 50% { transform: translate(-28px,-22px); opacity: 0.85; } }
+
+  .lamp-glow {
+    position: absolute;
+    left: 50%; top: 30%;
+    width: 640px; height: 640px;
+    margin-left: -320px;
+    background: radial-gradient(circle, rgba(255,214,150,0.32) 0%, rgba(255,190,110,0.12) 40%, rgba(255,180,100,0) 70%);
+    pointer-events: none;
+    animation: glow 6s ease-in-out infinite;
+    transition: opacity 1s ease;
+  }
+  @keyframes glow { 0%,100% { opacity: 0.8; } 50% { opacity: 1; } }
+
+  /* 熊整体：视差 */
+  .bear-wrap {
+    position: absolute;
+    left: 50%; top: 30%;
+    width: 560px; height: 560px;
+    margin-left: -280px;
+    transform: translate(var(--bx, 0px), var(--by, 0px));
+    z-index: 5;
+  }
+  /* 熊的身体：呼吸 + 点头 + 视线摆动都作用在这一层 */
+  .bear-body {
+    width: 100%; height: 100%;
+    transform-origin: 50% 88%;
+    animation: breathe 3.6s ease-in-out infinite, sway 9s ease-in-out infinite;
+  }
+  .bear-body img {
+    width: 100%; display: block;
+    filter: drop-shadow(0 18px 22px rgba(0,0,0,0.45));
+  }
+  @keyframes breathe {
+    0%, 100% { transform: translateY(0) scale(1); }
+    50% { transform: translateY(-9px) scale(1.012); }
+  }
+  @keyframes sway {
+    0%, 100% { transform: rotate(0deg); }
+    25% { transform: rotate(-1.1deg); }
+    50% { transform: rotate(0deg); }
+    75% { transform: rotate(1.1deg); }
+  }
+
+  /* 眨眼：两片眼皮，颜色取熊眼周的深色毛，盖在镜片内的眼睛上 */
+  .eye {
+    position: absolute;
+    top: 33.5%;
+    width: 4.2%;
+    height: 3.6%;
+    background: #6b4226;
+    border-radius: 40%;
+    z-index: 2;
+    transform: scaleY(0);
+    transform-origin: 50% 0%;
+    animation: blink 5.2s infinite;
+  }
+  .eye.left { left: 38%; animation-delay: 0s; }
+  .eye.right { left: 58%; animation-delay: 0.06s; }
+  @keyframes blink {
+    0%, 92%, 100% { transform: scaleY(0); }
+    95% { transform: scaleY(1); }
+    97% { transform: scaleY(0); }
+  }
+
+  /* 偶尔点头：一层额外的轻微下压，节奏和呼吸错开 */
+  .nod {
+    position: absolute; inset: 0;
+    z-index: 3;
+    animation: nod 11s ease-in-out infinite;
+    pointer-events: none;
+  }
+  @keyframes nod {
+    0%, 84%, 100% { transform: translateY(0) rotateX(0deg); }
+    87% { transform: translateY(6px) rotateX(6deg); }
+    90% { transform: translateY(0) rotateX(0deg); }
+  }
+
+  .desk {
+    position: absolute;
+    left: -2%; right: -2%; bottom: -4%;
+    height: 34%;
+    z-index: 8;
+    background:
+      linear-gradient(180deg, rgba(255,235,200,0.15) 0%, rgba(0,0,0,0) 6%),
+      repeating-linear-gradient(92deg, rgba(90,55,30,0.10) 0px, rgba(90,55,30,0.10) 2px, transparent 2px, transparent 40px),
+      linear-gradient(180deg, #7c5232 0%, #5c3a22 45%, #3d2616 100%);
+    border-top: 3px solid #9c6b42;
+    box-shadow: 0 -22px 40px rgba(0,0,0,0.35);
+    border-radius: 6px 6px 0 0;
+    transition: filter 1s ease;
+  }
+
+  .desk-items {
+    position: absolute;
+    left: 50%; bottom: 9%;
+    width: 640px; margin-left: -320px;
+    z-index: 9;
+    display: flex; align-items: flex-end; justify-content: space-between;
+  }
+  .item { position: relative; filter: drop-shadow(0 8px 8px rgba(0,0,0,0.4)); }
+  .book {
+    width: 150px; height: 30px;
+    background: linear-gradient(180deg, #f3ead6 0%, #d9cbb0 100%);
+    border-radius: 3px 3px 6px 6px;
+    transform: perspective(300px) rotateX(52deg);
+    border-bottom: 4px solid #b9a888;
+    transform-origin: 50% 100%;
+    animation: pageflip 8s ease-in-out infinite;
+  }
+  @keyframes pageflip { 0%,90%,100% { transform: perspective(300px) rotateX(52deg); } 94% { transform: perspective(300px) rotateX(40deg) rotateZ(-2deg); } }
+  .book::after { content: ''; position: absolute; left: 50%; top: 0; bottom: 0; width: 2px; background: rgba(120,95,60,0.4); }
+  .cup {
+    width: 38px; height: 44px;
+    background: linear-gradient(135deg, #e8e1d4, #b9ae9c);
+    border-radius: 6px 6px 12px 12px;
+    border: 2px solid rgba(255,255,255,0.4);
+  }
+  .cup::after { content: ''; position: absolute; right: -12px; top: 8px; width: 16px; height: 22px; border: 4px solid #cfc4b2; border-left: none; border-radius: 0 12px 12px 0; }
+  .steam {
+    position: absolute; right: 120px; bottom: 46px;
+    width: 4px; height: 20px; border-radius: 50%;
+    background: rgba(255,255,255,0.35);
+    filter: blur(2px);
+    animation: steam 3.5s ease-in-out infinite;
+  }
+  @keyframes steam { 0% { transform: translateY(6px) scaleY(0.6); opacity: 0; } 40% { opacity: 0.7; } 100% { transform: translateY(-16px) scaleY(1.3); opacity: 0; } }
+  .note {
+    width: 70px; height: 70px; background: #f6e7a8;
+    transform: perspective(300px) rotateX(50deg) rotateZ(-6deg);
+    box-shadow: 2px 4px 6px rgba(0,0,0,0.3);
+    padding: 8px; font-size: 9px; color: #7a6a35; line-height: 1.4; text-align: center;
+  }
+
+  .topbar { position: absolute; left: 32px; top: 26px; z-index: 20; color: #fff3e0; text-shadow: 0 2px 12px rgba(0,0,0,0.7); }
+  .topbar h1 { font-size: 22px; font-weight: 500; letter-spacing: 1px; }
+  .topbar p { font-size: 12px; opacity: 0.75; margin-top: 6px; }
+
+  .bubble {
+    position: absolute; left: 50%; top: 12%;
+    transform: translateX(-50%);
+    z-index: 20;
+    background: rgba(255,250,240,0.94); color: #4a3626;
+    padding: 12px 20px; border-radius: 16px;
+    font-size: 14px; white-space: nowrap;
+    box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+    transition: opacity 0.3s ease, transform 0.3s ease;
+  }
+  .bubble::after { content: ''; position: absolute; left: 50%; bottom: -8px; margin-left: -8px; border: 8px solid transparent; border-top-color: rgba(255,250,240,0.94); border-bottom: 0; }
+
+  .panel {
+    position: absolute; right: 28px; top: 50%; transform: translateY(-50%);
+    z-index: 20; width: 190px;
+    background: rgba(28,20,14,0.62); backdrop-filter: blur(10px);
+    border: 1px solid rgba(255,230,190,0.16); border-radius: 16px;
+    padding: 18px; color: #f0e4d2;
+  }
+  .panel h2 { font-size: 13px; opacity: 0.7; margin-bottom: 10px; font-weight: 400; }
+  .panel h2:not(:first-child) { margin-top: 18px; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .btn {
+    flex: 1; min-width: 48px; padding: 8px 4px;
+    font-size: 12px; font-family: inherit; color: #f0e4d2;
+    background: rgba(255,235,200,0.08);
+    border: 1px solid rgba(255,230,190,0.2); border-radius: 9px; cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn:hover { background: rgba(255,235,200,0.2); }
+  .btn.active { background: #c89154; border-color: #e0aa6c; color: #2a1a0e; font-weight: 500; }
+
+  .hint { position: absolute; left: 32px; bottom: 22px; z-index: 20; font-size: 12px; color: rgba(255,240,220,0.62); text-shadow: 0 1px 6px rgba(0,0,0,0.8); line-height: 1.7; }
+
+  /* 摸鱼态：呼吸变慢、身体下滑歪头、眨眼变快 */
+  .scene.slack .bear-body { animation: breathe-slow 5s ease-in-out infinite, sway-slow 14s ease-in-out infinite; }
+  .scene.slack .bear-wrap { transform: translate(var(--bx,0px), calc(var(--by,0px) + 14px)) rotate(-2deg); transition: transform 0.6s ease; }
+  .scene.slack .eye { animation-duration: 3s; }
+  @keyframes breathe-slow { 0%,100% { transform: translateY(0) scale(1); } 50% { transform: translateY(-4px) scale(1.005); } }
+  @keyframes sway-slow { 0%,100% { transform: rotate(-2deg); } 50% { transform: rotate(-3deg); } }
+
+  .scene.dusk .bg { filter: blur(2px) brightness(0.7) saturate(1.15) sepia(0.2); }
+  .scene.dusk .vignette { background: radial-gradient(ellipse at 50% 42%, rgba(0,0,0,0) 25%, rgba(60,25,10,0.6) 100%); }
+  .scene.night .bg { filter: blur(2px) brightness(0.34) saturate(0.7) hue-rotate(-8deg); }
+  .scene.night .lamp-glow { opacity: 1; }
+  .scene.night .vignette { background: radial-gradient(ellipse at 50% 40%, rgba(0,0,0,0) 15%, rgba(8,10,24,0.78) 100%); }
+  .scene.night .desk { filter: brightness(0.55); }
+</style>
+</head>
+<body>
+
+<div class="scene" id="scene">
+  <div class="bg" id="bg"></div>
+  <div class="lamp-glow"></div>
+  <div class="dust d1"></div>
+  <div class="dust d2"></div>
+  <div class="dust d3"></div>
+  <div class="dust d4"></div>
+  <div class="vignette"></div>
+
+  <div class="bubble" id="bubble">我先把书翻开，你也坐好啦。</div>
+
+  <div class="bear-wrap" id="bearWrap">
+    <div class="bear-body" id="bearBody">
+      <img src="assets/chenggong-serious.png" alt="陪学熊" id="bear">
+      <div class="eye left"></div>
+      <div class="eye right"></div>
+    </div>
+    <div class="nod"></div>
+  </div>
+
+  <div class="desk"></div>
+  <div class="desk-items">
+    <div class="item note">今天<br>也要<br>坐住</div>
+    <div class="item book"></div>
+    <div class="item steam"></div>
+    <div class="item cup"></div>
+  </div>
+
+  <div class="topbar">
+    <h1>小熊镇自习室</h1>
+    <p>2D 动画版 · 眨眼 / 呼吸 / 点头 / 视线 / 镜头 / 环境动</p>
+  </div>
+
+  <div class="panel">
+    <h2>熊的表情</h2>
+    <div class="btn-row" id="emoRow">
+      <button class="btn" data-emo="natural">自然</button>
+      <button class="btn active" data-emo="serious">认真</button>
+      <button class="btn" data-emo="happy">开心</button>
+      <button class="btn" data-emo="helpless">无奈</button>
+      <button class="btn" data-emo="confused">疑惑</button>
+    </div>
+    <h2>时段氛围</h2>
+    <div class="btn-row" id="timeRow">
+      <button class="btn active" data-time="day">白天</button>
+      <button class="btn" data-time="dusk">傍晚</button>
+      <button class="btn" data-time="night">深夜</button>
+    </div>
+    <h2>场景状态</h2>
+    <div class="btn-row" id="stateRow">
+      <button class="btn active" data-state="focus">专注中</button>
+      <button class="btn" data-state="slack">摸鱼中</button>
+    </div>
+  </div>
+
+  <div class="hint">
+    移动鼠标 → 视差 · 熊会自己眨眼、呼吸、点头、晃头<br>
+    切"摸鱼中"看它怎么垮下去 · 全部现成 2D 图 + CSS，没有 3D
+  </div>
+</div>
+
+<script>
+  var scene = document.getElementById('scene');
+  var bear = document.getElementById('bear');
+  var bubble = document.getElementById('bubble');
+
+  scene.addEventListener('mousemove', function (e) {
+    var x = (e.clientX / window.innerWidth - 0.5) * 2;
+    var y = (e.clientY / window.innerHeight - 0.5) * 2;
+    scene.style.setProperty('--px', (-x * 18) + 'px');
+    scene.style.setProperty('--py', (-y * 12) + 'px');
+    scene.style.setProperty('--bx', (x * 14) + 'px');
+    scene.style.setProperty('--by', (y * 8) + 'px');
+    scene.style.setProperty('--zoom', (1.04 + (1 - Math.abs(y)) * 0.015));
+  });
+
+  function bindRow(id, attr, onPick) {
+    var row = document.getElementById(id);
+    var buttons = row.getElementsByTagName('button');
+    for (var i = 0; i < buttons.length; i++) {
+      buttons[i].addEventListener('click', function () {
+        for (var j = 0; j < buttons.length; j++) buttons[j].classList.remove('active');
+        this.classList.add('active');
+        onPick(this.getAttribute(attr));
+      });
+    }
+  }
+
+  var emoLine = {
+    natural: '嗯……书翻开就好了。',
+    serious: '我先把书翻开，你也坐好啦。',
+    happy: '这一页我读懂了，你也加油！',
+    helpless: '我又走神了……咳，继续。',
+    confused: '咦？这道题刚才讲到哪了？'
+  };
+  bindRow('emoRow', 'data-emo', function (v) {
+    bear.src = 'assets/chenggong-' + v + '.png';
+    bubble.textContent = emoLine[v];
+  });
+
+  bindRow('timeRow', 'data-time', function (v) {
+    var state = document.getElementById('scene').classList.contains('slack') ? ' slack' : '';
+    scene.className = 'scene' + (v === 'day' ? '' : ' ' + v) + state;
+  });
+
+  var stateLine = {
+    focus: '坐得住真好，我也稳住了。',
+    slack: '我就看一眼窗外……你看你的。'
+  };
+  bindRow('stateRow', 'data-state', function (v) {
+    bubble.textContent = stateLine[v];
+    bear.src = 'assets/chenggong-' + (v === 'focus' ? 'serious' : 'helpless') + '.png';
+    var timeBtn = document.querySelector('#timeRow .active');
+    var t = timeBtn.getAttribute('data-time');
+    scene.className = 'scene' + (t === 'day' ? '' : ' ' + t) + (v === 'slack' ? ' slack' : '');
+  });
+</script>
+
+</body>
+</html>

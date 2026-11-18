@@ -1,0 +1,21 @@
+{
+  "labels": [
+    {"id": "spam", "name": "垃圾信息"},
+    {"id": "ham", "name": "正常信息"},
+    {"id": "ghost", "name": "已经废弃的标签"}
+  ],
+  "samples": [
+    {"id": "s001", "label": "spam", "used_in": ["train"]},
+    {"id": "s002", "label": "ham", "used_in": ["train", "test"]},
+    {"id": "s002", "label": "spam", "used_in": []},
+    {"id": "s004", "label": "typo_label", "used_in": ["train"]}
+  ],
+  "report": {
+    "mentioned_labels": ["spam", "ghost"]
+  },
+  "evidence": [
+    {"dim": "O", "source": "s001"},
+    {"dim": "O", "source": "s002"},
+    {"dim": "C", "source": "s004"}
+  ]
+}

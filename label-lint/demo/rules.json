@@ -1,0 +1,44 @@
+{
+  "name": "标注数据质检示例",
+  "checks": [
+    {
+      "id": "unique_sample_id",
+      "kind": "unique",
+      "desc": "样本 id 不能重复",
+      "items": {"path": "samples.*.id"},
+      "severity": "error"
+    },
+    {
+      "id": "label_registered",
+      "kind": "subset",
+      "desc": "样本用的标签必须都在注册表里",
+      "subset": {"path": "samples.*.label"},
+      "superset": {"path": "labels.*.id"},
+      "severity": "error"
+    },
+    {
+      "id": "label_has_user",
+      "kind": "no_orphan",
+      "desc": "注册过的标签至少要被一个样本用",
+      "source": {"path": "labels.*.id"},
+      "target": {"path": "samples.*.label"},
+      "severity": "warn"
+    },
+    {
+      "id": "label_in_report",
+      "kind": "no_orphan",
+      "desc": "用到的标签要在报告里被兑现（否则就是无消费者的标注）",
+      "source": {"path": "samples.*.label"},
+      "target": {"path": "report.mentioned_labels.*"},
+      "severity": "warn"
+    },
+    {
+      "id": "evidence_floor",
+      "kind": "min_count",
+      "desc": "每个维度至少 2 条证据",
+      "items": {"path": "evidence.*.dim"},
+      "min_each": 2,
+      "severity": "warn"
+    }
+  ]
+}

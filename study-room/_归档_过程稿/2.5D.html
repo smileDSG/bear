@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小熊镇自习室 · 2.5D 草图</title>
+<style>
+  *{box-sizing:border-box}
+  body{margin:0;padding:16px;background:#EFEAE0;color:#2C2C2A;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;flex-direction:column;align-items:center}
+  h1{font-size:16px;margin:4px 0 10px}
+  .sub{font-size:12px;color:#6b6459;margin-bottom:14px;text-align:center;line-height:1.5}
+
+  .scene{position:relative;width:760px;max-width:100%;height:430px;border-radius:14px;
+    overflow:hidden;background:#EEE0C4;box-shadow:0 6px 22px rgba(0,0,0,.14);
+    perspective:1000px;cursor:crosshair}
+  .scene.night{background:#312b3a}
+  .scene.dusk{background:#E3A874}
+
+  .layer{position:absolute;inset:0;transition:transform .18s ease-out}
+
+  .window{position:absolute;left:6%;top:8%;width:26%;height:38%;background:#BFE0EA;
+    border:8px solid #E4D3B6;border-radius:4px}
+  .night .window{background:#26304c}
+  .dusk .window{background:#F3B978}
+  .window::before{content:"";position:absolute;left:50%;top:0;width:6px;height:100%;background:#E4D3B6;transform:translateX(-50%)}
+  .window::after{content:"";position:absolute;top:52%;left:0;width:100%;height:6px;background:#E4D3B6;transform:translateY(-50%)}
+  .tree{position:absolute;left:8%;top:13%;width:20%;height:32%;
+    background:radial-gradient(circle at 40% 45%,#8FB67A 0 38%,transparent 44%),
+               radial-gradient(circle at 70% 60%,#7FA36B 0 34%,transparent 40%);opacity:.5}
+  .shelf{position:absolute;right:5%;top:6%;width:24%;height:42%;background:#C49A64;border-radius:3px;padding:7px}
+  .shelf .row{height:30%;margin-bottom:6px;display:flex;gap:3px;align-items:flex-end}
+  .shelf i{flex:1;border-radius:2px 2px 0 0}
+  .b1{background:#B25B4A;height:80%}.b2{background:#5E7C63;height:100%}
+  .b3{background:#C89B4A;height:70%}.b4{background:#7A6A96;height:90%}.b5{background:#4E7B8C;height:75%}
+  .night .shelf{filter:brightness(.45)}
+
+  .far{position:absolute;top:31%;width:4.5%;height:15%;background:rgba(80,72,64,.2);border-radius:45% 45% 0 0}
+  .f1{left:42%}.f2{left:55%;height:13%;top:33%}.f3{left:70%;height:14%;top:32%}
+
+  .lampglow{position:absolute;width:30%;height:50%;top:20%;border-radius:50%;
+    background:radial-gradient(circle,rgba(255,208,120,.5) 0%,rgba(255,208,120,0) 70%);
+    opacity:.35;pointer-events:none}
+  .night .lampglow{opacity:1}
+  .lg-me{left:15%}.lg-npc{left:57%}
+  .sunspot{position:absolute;left:20%;top:46%;width:26%;height:16%;border-radius:50%;
+    background:rgba(255,246,210,.35);filter:blur(6px);animation:drift 14s ease-in-out infinite alternate}
+  @keyframes drift{from{transform:translateX(0)}to{transform:translateX(60px)}}
+
+  .desk{position:absolute;left:3%;right:3%;bottom:0;height:33%;
+    background:linear-gradient(#CBA873,#B4875A);border-top:6px solid #9c7247;
+    border-radius:40% 40% 0 0 / 12% 12% 0 0}
+  .set{position:absolute;top:16%;width:32%;height:58%}
+  .set-me{left:9%}.set-npc{right:9%}
+  .notebook{position:absolute;left:4%;top:20%;width:46%;height:44%;background:#FFFDF5;
+    border:1px solid #d8c8aa;border-radius:3px;box-shadow:0 3px 6px rgba(0,0,0,.12)}
+  .notebook .ln{height:1px;background:#e6dcc8;margin:9px 8px 0}
+  .thickbook{position:absolute;left:6%;top:18%;width:50%;height:40%;background:#FBF6E8;
+    border:1px solid #d8c8aa;border-radius:3px;display:flex;box-shadow:0 3px 6px rgba(0,0,0,.12)}
+  .thickbook .pg{flex:1;border-right:1px solid #e0d4bc}
+  .pen{position:absolute;right:12%;top:36%;width:20%;height:3px;background:#5b5b5b;border-radius:2px;transform:rotate(-18deg)}
+  .cup{position:absolute;right:7%;top:22%;width:12%;height:24%;background:#F4EDE0;border-radius:3px 3px 8px 8px;border:1px solid #cdbfa6}
+  .cup::after{content:"";position:absolute;right:-30%;top:18%;width:38%;height:46%;border:3px solid #cdbfa6;border-left:0;border-radius:0 8px 8px 0}
+  .sticky{position:absolute;left:6%;top:74%;width:20%;height:19%;background:#F6E7A8;border:1px solid #e0cf85;transform:rotate(-4deg)}
+
+  .lamp{position:absolute;top:14%;width:11%;height:7%;background:#E7C98F;border-radius:50% 50% 8px 8px;border:1px solid #c8a96e}
+  .lm-me{left:27%}.lm-npc{right:27%}
+
+  .bear{position:absolute;top:13%;width:28%}
+  .bear img{width:100%;display:block}
+  .me{left:11%}.npc{right:11%}
+  .bubble{position:absolute;background:#fff;border:1.5px solid #d8cbb4;padding:6px 10px;
+    border-radius:12px;font-size:12px;line-height:1.4;box-shadow:0 3px 10px rgba(0,0,0,.08);max-width:128px}
+  .npc .bubble{right:-6%;top:4%}
+  .bubble::after{content:"";position:absolute;left:20px;bottom:-7px;border:7px solid transparent;border-top-color:#fff;border-bottom:0}
+
+  .plant{position:absolute;left:49%;top:9%;width:7%;height:16%;background:#B98A5E;border-radius:3px 3px 8px 8px}
+  .plant::before{content:"";position:absolute;left:16%;top:-62%;width:68%;height:72%;
+    background:radial-gradient(circle,#7FA36B 0 45%,transparent 50%)}
+
+  .goal{position:absolute;left:3%;bottom:8%;background:#FFFDF5;border:1px solid #d8c8aa;border-radius:9px;padding:6px 10px;font-size:12px;z-index:6}
+  .goal .lbl{font-size:10px;color:#8a8073}
+  .timer{position:absolute;left:50%;bottom:7%;transform:translateX(-50%);font-size:28px;font-weight:600;
+    color:#412402;letter-spacing:2px;background:rgba(255,253,245,.92);padding:2px 14px;border-radius:10px;border:1px solid #d8c8aa;z-index:6}
+
+  .fore{pointer-events:none}
+  .fg-book{position:absolute;right:-2%;bottom:-6%;width:30%;height:34%;background:#EDE3CC;
+    border-radius:8px 0 0 0;transform:rotate(-8deg);border:1px solid #cdbfa6;
+    filter:blur(2.5px);opacity:.9}
+  .fg-pen{position:absolute;right:16%;bottom:5%;width:16%;height:5px;background:#5b5b5b;
+    border-radius:3px;transform:rotate(-24deg);filter:blur(1.5px)}
+
+  .depth{position:absolute;right:2%;top:3%;font-size:11px;color:#7a7060;background:rgba(255,255,255,.6);
+    padding:4px 8px;border-radius:8px;z-index:7}
+
+  .controls{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:760px}
+  .controls button{font-size:13px;padding:8px 13px;border:1px solid #b9a98f;background:#FFFDF7;
+    color:#2C2C2A;border-radius:10px;cursor:pointer}
+  .hint{font-size:12px;color:#6b6459;margin-top:12px;text-align:center;line-height:1.6;max-width:760px}
+</style>
+</head>
+<body>
+  <h1>小熊镇自习室 · 2.5D 草图</h1>
+  <div class="sub">鼠标在画面里移动 —— 看四层怎么错开产生纵深。现成 2D 立绘 + 分层视差 + 光影，没有一行 3D 建模。</div>
+
+  <div class="scene" id="scene">
+    <div class="layer" data-d="0.012" id="bg">
+      <div class="window"></div><div class="tree"></div>
+      <div class="shelf">
+        <div class="row"><i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i><i class="b5"></i></div>
+        <div class="row"><i class="b3"></i><i class="b1"></i><i class="b5"></i><i class="b2"></i><i class="b4"></i></div>
+        <div class="row"><i class="b4"></i><i class="b2"></i><i class="b1"></i><i class="b5"></i><i class="b3"></i></div>
+      </div>
+    </div>
+
+    <div class="layer" data-d="0.03" id="farlayer">
+      <div class="far f1"></div><div class="far f2"></div><div class="far f3"></div>
+    </div>
+
+    <div class="layer" data-d="0.055" id="mid">
+      <div class="lampglow lg-me"></div><div class="lampglow lg-npc"></div>
+      <div class="sunspot"></div>
+      <div class="lamp lm-me"></div><div class="lamp lm-npc"></div>
+      <div class="bear me"><img id="meImg" src="xiaozhao-natural.png" alt="你"></div>
+      <div class="bear npc" id="npcBear">
+        <img id="npcImg" src="xiaolin-serious.png" alt="小林">
+        <div class="bubble" id="bubble">（安静地看着书）</div>
+      </div>
+      <div class="plant"></div>
+      <div class="desk">
+        <div class="set set-me">
+          <div class="notebook"><div class="ln"></div><div class="ln"></div><div class="ln"></div><div class="ln"></div></div>
+          <div class="sticky"></div><div class="cup"></div>
+        </div>
+        <div class="set set-npc">
+          <div class="thickbook"><div class="pg"></div><div class="pg"></div></div>
+          <div class="pen"></div><div class="cup"></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="layer fore" data-d="0.11" id="fore">
+      <div class="fg-book"></div><div class="fg-pen"></div>
+    </div>
+
+    <div class="goal"><div class="lbl">你的目标</div><div>刷完 2 套行测</div></div>
+    <div class="timer" id="timer">25:00</div>
+    <div class="depth">2.5D · 四层视差</div>
+  </div>
+
+  <div class="controls">
+    <button onclick="setNpc('natural')">它·自然</button>
+    <button onclick="setNpc('serious')">它·认真</button>
+    <button onclick="setNpc('happy')">它·开心</button>
+    <button onclick="setNpc('helpless')">它·无奈</button>
+    <button onclick="setNpc('confused')">它·疑惑</button>
+  </div>
+  <div class="controls">
+    <button onclick="setTime('day')">白天</button>
+    <button onclick="setTime('dusk')">傍晚</button>
+    <button onclick="setTime('night')">夜晚·两盏灯</button>
+    <button onclick="breakTime()">休息一下</button>
+    <button onclick="startTimer()">开始/暂停</button>
+    <button onclick="poke()">戳一下它</button>
+  </div>
+
+  <div class="hint" id="hint">
+    四层从远到近：背景墙窗书架 → 远处人影 → 你和同桌 → 前景你虚化的书和笔。鼠标移动时近的错得多、远的错得少，眼睛就读出了空间。<br>
+    这就是 2.5D：素材全是现成 2D，靠分层和光影造纵深。前景的虚化桌面是“你正坐在这儿”的第一人称提示，和两个并排角色不冲突。
+  </div>
+
+<script>
+  var NPC={'natural':'xiaolin-natural.png','serious':'xiaolin-serious.png','happy':'xiaolin-happy.png','helpless':'xiaolin-helpless.png','confused':'xiaolin-confused.png'};
+  var npcImg=document.getElementById('npcImg'),bubble=document.getElementById('bubble'),
+      scene=document.getElementById('scene'),timerEl=document.getElementById('timer'),
+      layers=scene.querySelectorAll('.layer'),tick=null,left=25*60;
+
+  scene.addEventListener('mousemove',function(e){
+    var r=scene.getBoundingClientRect();
+    var x=(e.clientX-r.left)/r.width-0.5, y=(e.clientY-r.top)/r.height-0.5;
+    layers.forEach(function(l){
+      var d=parseFloat(l.getAttribute('data-d'));
+      l.style.transform='translate('+(-x*d*700)+'px,'+(-y*d*400)+'px)';
+    });
+  });
+  scene.addEventListener('mouseleave',function(){
+    layers.forEach(function(l){l.style.transform='translate(0,0)';});
+  });
+
+  function setNpc(e){npcImg.src=NPC[e];}
+  function setTime(t){
+    scene.className='scene'+(t==='day'?'':' '+t);
+    if(t==='night')bubble.textContent='（拧亮台灯，继续看书）';
+    else if(t==='dusk')bubble.textContent='（天暗了，翻了一页）';
+    else bubble.textContent='（安静地看着书）';
+  }
+  function breakTime(){setNpc('happy');bubble.textContent='歇会儿吧，我也合上书了。';}
+  function startTimer(){
+    if(tick){clearInterval(tick);tick=null;bubble.textContent='（又低头继续）';setNpc('serious');return;}
+    setNpc('serious');bubble.textContent='（安静地看着书）';
+    tick=setInterval(function(){
+      left--;var m=Math.floor(left/60),s=left%60;
+      timerEl.textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+      if(left<=0){clearInterval(tick);tick=null;breakTime();}
+    },1000);
+  }
+  function poke(){
+    var lines=['嗯？我在看这章。','你也加油，别看我。','这道题卡好久了。','先专心，回头说。'];
+    bubble.textContent=lines[Math.floor(Math.random()*lines.length)];
+  }
+</script>
+</body>
+</html>

@@ -59,7 +59,7 @@
       "line": "话少，只问结论和成本。不陪你聊天，但会记住你兑现过什么。",
       "note": "不进关系系统",
       "noteDetail": "事务型直属上级：无好感度、无熊友卡、不参与邀约",
-      "loadout": "bear_orange_blazer",
+      "loadout": "chen_gong",
       "route": [
         [
           405,
@@ -92,7 +92,7 @@
       "zone": "C",
       "name": "小林",
       "role": "产品",
-      "place": "创意水巷",
+      "place": "销售部",
       "line": "被客户催得急，语速偏快。先把需求塞给你，再跟你一起想办法。",
       "note": "",
       "loadout": "bear_beige_blazer",

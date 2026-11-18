@@ -12,7 +12,7 @@ const COVER_EXIT := preload("res://assets/开始游戏页面/按钮-退出游戏
 const COVER_START_CROP := Rect2(145, 70, 1880, 550)
 const COVER_SETTINGS_CROP := Rect2(190, 130, 1800, 470)
 const COVER_EXIT_CROP := Rect2(166, 118, 1840, 474)
-const B_AREA_ART := preload("res://assets/场景内部图/云栖科技丘.png")
+const B_AREA_ART := preload("res://assets/八大区域地图重制版/B_研发部.png")
 const WANG_GE_PORTRAIT := preload("res://assets/ui/rework_v1/profile/components/03_人际关系/王哥头像.png")
 const INTRO_DIALOG_BG := preload("res://assets/对话框/角色对话框_空白.png")
 const INTRO_BUTTON_PRIMARY := preload("res://assets/ui/rework_v1/task_book/20_推进按钮底板.png")
@@ -55,11 +55,11 @@ const CONTENT_RECT := Rect2(94, 238, 1512, 600)
 
 ## 引言三页（开发文档 11.14）。
 const PAGES := [
-	{"tab":"入职", "kicker":"入职 · B 区 云栖科技丘", "title":"换一种熊生，先试一年",
+	{"tab":"入职", "kicker":"入职 · B 区 研发部", "title":"换一种熊生，先试一年",
 	 "body":"旧工作像一摞改不完的文件。你看到「职场小镇」的招工启事，点了申请——想试试换一种活法。",
 	 "body2":"接下来的十二个月，你在 B 区做真实项目：两次评估，第 6 个月转正，第 12 个月晋升。",
 	 "quote":"「来这儿不是躲清闲，是看看你还能做成什么。」", "quote_by":"王哥 · 你的导师",
-	 "footer":"B 区 · 云栖科技丘 · 一年后见", "art":B_AREA_ART},
+	 "footer":"B 区 · 研发部 · 一年后见", "art":B_AREA_ART},
 	{"tab":"怎么玩", "kicker":"操作", "title":"先学会走路，再学会做事",
 	 "controls":true, "footer":"移动、交互、看地图——先把这四件事用顺"},
 	{"tab":"每个月", "kicker":"每个月", "title":"主线必做，其余自选",
@@ -84,6 +84,8 @@ const LOOP_STEPS := [
 ]
 var _mode := "title"
 var _page := 0
+## 开局入职自评（trait → 1..5）：由入职预演屏后面的登记表五题填。
+var _self_ratings := {}
 var _fonts: Dictionary = {}
 var _intro_started_ms := 0
 var _report_panel: CanvasLayer
@@ -131,6 +133,8 @@ func _rebuild() -> void:
 		_background(INTRO_BG, 0.60)
 		if _mode == "avatar":
 			_avatar_screen()
+		elif _mode == "scenario":
+			_scenario_screen()
 		else:
 			_intro_screen()
 
@@ -508,7 +512,7 @@ func _footer(frame: Panel, page: Dictionary) -> void:
 	if _page < PAGES.size() - 1:
 		next.pressed.connect(func(): _go_page(_page + 1))
 	else:
-		next.pressed.connect(_start_avatar_selection)
+		next.pressed.connect(_start_scenarios)
 	frame.add_child(next)
 
 
@@ -524,6 +528,25 @@ func _start_intro() -> void:
 	_page = 0
 	_intro_started_ms = Time.get_ticks_msec()
 	_rebuild()
+
+## 导览看完后接两道入职预演；预演不写档案，选完直接去选形象。
+func _start_scenarios() -> void:
+	_mode = "scenario"
+	_rebuild()
+
+func _scenario_screen() -> void:
+	var scenarios = load("res://scripts/StartupScenarios.gd").new()
+	# 预演屏后面就是登记表五题：finished 时把答案接过来，进小镇那刻写进档案。
+	scenarios.finished.connect(func() -> void:
+		var given = scenarios.get("ratings")
+		if given is Dictionary:
+			_self_ratings = (given as Dictionary).duplicate(true)
+		_start_avatar_selection())
+	scenarios.back_requested.connect(func() -> void:
+		_mode = "intro"
+		_page = PAGES.size() - 1
+		_rebuild())
+	add_child(scenarios)
 
 ## 继续游戏：跳过导览直接进小镇，不重写 profile（保留上次开局留下的文件）。
 ## ⚠ 当前存档粒度只有「玩过没有」——真正的进度续玩（currentNodeId / 月份 / 精力落盘）
@@ -542,7 +565,17 @@ func _quit_game() -> void:
 func _enter_town() -> void:
 	WorldClock.reset_story()
 	var file := FileAccess.open(PROFILE_PATH, FileAccess.WRITE)
-	if file != null: file.store_string(JSON.stringify({"sessionId":"local-" + str(Time.get_unix_time_from_system()), "avatarId":PlayerProfile.get_selected_avatar_id(), "contentVersion":"v1.2", "currentNodeId":"E01", "unlockedRegionIds":["A", "B", "C", "D", "E", "F", "G", "H"]}))
+	if file != null:
+		var profile := {
+			"sessionId": "local-" + str(Time.get_unix_time_from_system()),
+			"avatarId": PlayerProfile.get_selected_avatar_id(),
+			"contentVersion": "v1.2",
+			"currentNodeId": "E01",
+			"unlockedRegionIds": ["A", "B", "C", "D", "E", "F", "G", "H"],
+			# 入职自评（trait → 1..5）。空表 = 玩家跳过了登记，报告那边不许当成"答过"。
+			"selfRatings": _self_ratings.duplicate(true),
+		}
+		file.store_string(JSON.stringify(profile))
 	get_tree().change_scene_to_file("res://Main.tscn")
 
 
@@ -620,6 +653,8 @@ func _avatar_screen() -> void:
 	confirm.size = Vector2(450, 68)
 	confirm.pressed.connect(_enter_town)
 	frame.add_child(confirm)
+
+
 
 
 func _layout_startup_frame(frame: Panel) -> void:

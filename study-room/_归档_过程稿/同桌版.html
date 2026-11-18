@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小熊镇自习室 · 同桌版草图</title>
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 16px; background:#EFEAE0; color:#2C2C2A;
+    font-family:-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex; flex-direction:column; align-items:center;
+  }
+  h1 { font-size:16px; margin:4px 0 10px; }
+  .sub { font-size:12px; color:#6b6459; margin-bottom:14px; text-align:center; line-height:1.5; }
+
+  .scene {
+    position:relative; width:760px; max-width:100%; height:440px;
+    border-radius:14px; overflow:hidden; background:#EFE2C8;
+    box-shadow:0 6px 22px rgba(0,0,0,.12);
+  }
+  .scene.night{ background:#37313f; }
+  .scene.dusk { background:#E7B183; }
+
+  .window{
+    position:absolute; left:5%; top:7%; width:30%; height:40%;
+    background:#BFE0EA; border:8px solid #E4D3B6; border-radius:4px;
+  }
+  .night .window{ background:#28324e; }
+  .dusk .window { background:#F2B877; }
+  .window::before{content:"";position:absolute;left:50%;top:0;width:6px;height:100%;background:#E4D3B6;transform:translateX(-50%);}
+  .window::after {content:"";position:absolute;top:52%;left:0;width:100%;height:6px;background:#E4D3B6;transform:translateY(-50%);}
+  .tree{
+    position:absolute; left:8%; top:14%; width:16%; height:30%;
+    background:radial-gradient(circle at 50% 40%, #8FB67A 0 40%, transparent 45%);
+    opacity:.55;
+  }
+
+  .shelf{position:absolute;right:5%;top:6%;width:26%;height:44%;background:#C49A64;border-radius:4px;padding:8px;}
+  .shelf .row{height:30%;margin-bottom:6px;display:flex;gap:4px;align-items:flex-end;}
+  .shelf i{flex:1;border-radius:2px 2px 0 0;}
+  .b1{background:#B25B4A;height:80%}.b2{background:#5E7C63;height:100%}
+  .b3{background:#C89B4A;height:70%}.b4{background:#7A6A96;height:90%}.b5{background:#4E7B8C;height:75%}
+  .night .shelf{filter:brightness(.5);}
+
+  .far-silhouette{
+    position:absolute; top:30%; width:5%; height:16%;
+    background:rgba(90,80,70,.22); border-radius:40% 40% 0 0;
+  }
+  .fs1{left:40%}.fs2{left:62%;height:14%;top:32%}
+
+  .glow{
+    position:absolute; width:26%; height:46%; top:22%; border-radius:50%;
+    background:radial-gradient(circle, rgba(255,209,120,.45) 0%, rgba(255,209,120,0) 70%);
+    opacity:0; pointer-events:none;
+  }
+  .night .glow{opacity:1}
+  .g-me{left:16%}.g-npc{left:58%}
+
+  .bear{
+    position:absolute; top:14%; width:32%;
+    transform-origin:50% 90%; transition:transform .3s;
+  }
+  .bear img{width:100%;display:block;}
+  .me{left:8%;} .npc{right:8%;}
+  .bubble{
+    position:absolute; background:#fff; border:1.5px solid #d8cbb4;
+    padding:6px 10px; border-radius:12px; font-size:12px; line-height:1.4;
+    box-shadow:0 3px 10px rgba(0,0,0,.08); max-width:130px;
+  }
+  .npc .bubble{ right:-4%; top:2%; }
+  .bubble::after{content:"";position:absolute;left:20px;bottom:-7px;border:7px solid transparent;border-top-color:#fff;border-bottom:0;}
+
+  .desk{
+    position:absolute;left:0;right:0;bottom:0;height:34%;
+    background:linear-gradient(#C9A270,#B8895A); border-top:6px solid #9c7247;
+  }
+  .desk-edge{position:absolute;left:0;right:0;top:0;height:6px;background:#9c7247;}
+
+  .set{position:absolute;top:14%;width:34%;height:60%;}
+  .set-me{left:6%;} .set-npc{right:6%;}
+  .notebook{
+    position:absolute;left:6%;top:18%;width:44%;height:46%;
+    background:#FFFDF5;border:1px solid #d8c8aa;border-radius:3px;
+    box-shadow:0 3px 6px rgba(0,0,0,.1);
+  }
+  .notebook .line{height:1px;background:#e6dcc8;margin:9px 8px 0;}
+  .thickbook{
+    position:absolute;left:8%;top:16%;width:48%;height:42%;background:#FBF6E8;
+    border:1px solid #d8c8aa;border-radius:3px;display:flex;box-shadow:0 3px 6px rgba(0,0,0,.1);
+  }
+  .thickbook .pg{flex:1;border-right:1px solid #e0d4bc;}
+  .pen{position:absolute;right:14%;top:34%;width:20%;height:3px;background:#5b5b5b;border-radius:2px;transform:rotate(-18deg);}
+  .cup{position:absolute;right:8%;top:20%;width:12%;height:24%;background:#F4EDE0;border-radius:3px 3px 8px 8px;border:1px solid #cdbfa6;}
+  .cup::after{content:"";position:absolute;right:-30%;top:18%;width:38%;height:46%;border:3px solid #cdbfa6;border-left:0;border-radius:0 8px 8px 0;}
+  .sticky{position:absolute;left:8%;top:72%;width:20%;height:20%;background:#F6E7A8;border:1px solid #e0cf85;transform:rotate(-4deg);}
+  .eraser{position:absolute;right:20%;top:74%;width:10%;height:8%;background:#E8C9C0;border:1px solid #cdb0a6;border-radius:2px;}
+
+  .plant{
+    position:absolute;left:50%;top:10%;transform:translateX(-50%);
+    width:8%;height:20%;background:#B98A5E;border-radius:3px 3px 8px 8px;
+  }
+  .plant::before{content:"";position:absolute;left:18%;top:-60%;width:64%;height:70%;background:radial-gradient(circle,#7FA36B 0 45%,transparent 50%);}
+
+  .lamp{position:absolute;top:6%;width:12%;height:8%;background:#E7C98F;border-radius:50% 50% 8px 8px;border:1px solid #c8a96e;}
+  .lamp-me{left:24%}.lamp-npc{right:24%}
+  .lamp::after{content:"";position:absolute;left:48%;top:100%;width:4%;height:70px;background:#a98c5c;}
+
+  .timer{
+    position:absolute;left:50%;bottom:8%;transform:translateX(-50%);
+    font-size:30px;font-weight:600;color:#412402;letter-spacing:2px;
+    background:rgba(255,253,245,.9);padding:2px 14px;border-radius:10px;border:1px solid #d8c8aa;
+  }
+  .night .timer{color:#412402}
+  .goal{
+    position:absolute;left:3%;bottom:9%;background:#FFFDF5;border:1px solid #d8c8aa;
+    border-radius:9px;padding:6px 10px;font-size:12px;
+  }
+  .goal .lbl{font-size:10px;color:#8a8073;}
+  .status{
+    position:absolute;right:3%;bottom:10%;font-size:11px;padding:4px 9px;
+    border:1px solid #cdbfa6;border-radius:8px;background:rgba(255,255,255,.75);
+  }
+
+  .controls{margin-top:16px;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;max-width:760px;}
+  .controls button{
+    font-size:13px;padding:8px 13px;border:1px solid #b9a98f;background:#FFFDF7;
+    color:#2C2C2A;border-radius:10px;cursor:pointer;
+  }
+  .controls button.on{background:#2C2C2A;color:#fff;}
+  .hint{font-size:12px;color:#6b6459;margin-top:12px;text-align:center;line-height:1.6;max-width:760px;}
+</style>
+</head>
+<body>
+  <h1>小熊镇自习室 · 同桌版草图</h1>
+  <div class="sub">你和它并排坐在同一张长桌前 —— 两个人、两盏灯、两套东西，这才是“自习室”。点按钮换表情、切时段、戳它。</div>
+
+  <div class="scene" id="scene">
+    <div class="window"></div><div class="tree"></div>
+    <div class="shelf">
+      <div class="row"><i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i><i class="b5"></i></div>
+      <div class="row"><i class="b3"></i><i class="b1"></i><i class="b5"></i><i class="b2"></i><i class="b4"></i></div>
+      <div class="row"><i class="b4"></i><i class="b2"></i><i class="b1"></i><i class="b5"></i><i class="b3"></i></div>
+    </div>
+    <div class="far-silhouette fs1"></div><div class="far-silhouette fs2"></div>
+    <div class="glow g-me"></div><div class="glow g-npc"></div>
+
+    <div class="lamp lamp-me"></div><div class="lamp lamp-npc"></div>
+
+    <div class="bear me">
+      <img id="meImg" src="xiaozhao-natural.png" alt="你">
+    </div>
+    <div class="bear npc" id="npcBear">
+      <img id="npcImg" src="xiaolin-serious.png" alt="小林">
+      <div class="bubble" id="bubble">（安静地看着书）</div>
+    </div>
+
+    <div class="desk"><div class="desk-edge"></div></div>
+
+    <div class="plant"></div>
+
+    <div class="set set-me">
+      <div class="notebook"><div class="line"></div><div class="line"></div><div class="line"></div><div class="line"></div></div>
+      <div class="sticky"></div>
+      <div class="cup"></div>
+    </div>
+    <div class="set set-npc">
+      <div class="thickbook"><div class="pg"></div><div class="pg"></div></div>
+      <div class="pen"></div>
+      <div class="cup"></div>
+      <div class="eraser"></div>
+    </div>
+
+    <div class="goal"><div class="lbl">你的目标</div><div>刷完 2 套行测</div></div>
+    <div class="timer" id="timer">25:00</div>
+    <div class="status" id="status">专注中 · 各自努力</div>
+  </div>
+
+  <div class="controls">
+    <button onclick="setNpc('natural')">它·自然</button>
+    <button onclick="setNpc('serious')">它·认真</button>
+    <button onclick="setNpc('happy')">它·开心</button>
+    <button onclick="setNpc('helpless')">它·无奈</button>
+    <button onclick="setNpc('confused')">它·疑惑</button>
+  </div>
+  <div class="controls">
+    <button onclick="setTime('day')">白天</button>
+    <button onclick="setTime('dusk')">傍晚</button>
+    <button onclick="setTime('night')">夜晚·两盏灯</button>
+    <button onclick="breakTime()">休息一下</button>
+    <button onclick="startTimer()">开始/暂停计时</button>
+    <button onclick="poke()">戳一下它</button>
+  </div>
+
+  <div class="hint" id="hint">
+    两个角色都是现成半身立绘，桌沿挡住下半身做成“坐着”。左边是你（可用任意一只熊当化身），右边是 NPC 小林。中间绿萝是天然边界。<br>
+    重点看：并排同在的感觉、两盏灯、两套分开的物品、专注期它不看你。想要“真人进出”的远景人流，得再补背景剪影素材。
+  </div>
+
+<script>
+  var NPC={'natural':'xiaolin-natural.png','serious':'xiaolin-serious.png','happy':'xiaolin-happy.png','helpless':'xiaolin-helpless.png','confused':'xiaolin-confused.png'};
+  var npcImg=document.getElementById('npcImg'), bubble=document.getElementById('bubble'),
+      scene=document.getElementById('scene'), timerEl=document.getElementById('timer'),
+      statusEl=document.getElementById('status'), tick=null, left=25*60;
+
+  function setNpc(e){ npcImg.src = NPC[e]; }
+  function setTime(t){
+    scene.className='scene'+(t==='day'?'':' '+t);
+    if(t==='night'){bubble.textContent='（开了台灯，继续看书）';}
+    else if(t==='dusk'){bubble.textContent='（天暗了，翻了一页）';}
+    else bubble.textContent='（安静地看着书）';
+  }
+  function breakTime(){
+    setNpc('happy');
+    bubble.textContent='歇会儿吧，我也合上书了。';
+    statusEl.textContent='休息中 · 可以搭话';
+  }
+  function startTimer(){
+    if(tick){clearInterval(tick);tick=null;bubble.textContent='（又低头继续）';statusEl.textContent='专注中 · 各自努力';setNpc('serious');return;}
+    setNpc('serious');bubble.textContent='（安静地看着书）';statusEl.textContent='专注中 · 各自努力';
+    tick=setInterval(function(){
+      left--;var m=Math.floor(left/60),s=left%60;
+      timerEl.textContent=(m<10?'0':'')+m+':'+(s<10?'0':'')+s;
+      if(left<=0){clearInterval(tick);tick=null;breakTime();}
+    },1000);
+  }
+  function poke(){
+    var lines=['嗯？我在看这章。','你也加油，别看我。','这道题我卡好久了。','先专心，回头说。'];
+    bubble.textContent=lines[Math.floor(Math.random()*lines.length)];
+  }
+</script>
+</body>
+</html>
