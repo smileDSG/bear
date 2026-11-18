@@ -69,3 +69,8 @@ btn_off.png
 
 # 下载的外部参考文档（非本项目资产）
 shared_1113_*.docx
+
+# 鸿蒙签名私钥与凭据：绝不入库
+signing/
+# 配合签名材料使用的密码生成脚本，同样排除
+tools/gen_sign_pwd.js
