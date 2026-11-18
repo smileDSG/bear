@@ -74,3 +74,7 @@ shared_1113_*.docx
 signing/
 # 配合签名材料使用的密码生成脚本，同样排除
 tools/gen_sign_pwd.js
+
+# 运行日志
+workplace_town/_run_8077.log
+workplace_town/godot_window.log
